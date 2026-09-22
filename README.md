@@ -81,6 +81,32 @@ jev_kit_triage { kind: "log", items: [...], maxItems: 200 }
 jev_kit_pick { task: "个人资料编辑抽屉的邮箱段", candidates: [...], noun: "component" }
 ```
 
+## UI 卡片
+
+设置页 → **Jev 决策工具箱**（`settings.section`，order 45），同时也挂在该插件自己的页面（`plugins.bundle.config`）。卡片显示的就一件事——**按通道的证据**：
+
+- 状态行：版本 / 通道数 / key 来源 / 今日用量；key 没解析到时显式警告（fail-open，不会卡住任何一轮）
+- 开关：启用（关闭后一个请求都不发）
+- 账本表（1/7/30 天窗口）：每个通道的次数、⛔、⚠️、p50、p95，**按颜色标注**：
+  - 红 = 抓到过东西（它的价值，值得人看一眼）
+  - 琥珀 = 只有警告
+  - 灰 = **样本够了却从未产生非中性判定 → 建议淘汰或改问句**（本表唯一的行动项）
+  - 无色 = 样本不足（**未测量过的东西不允许看起来像测量过**）
+- 跳过原因、通道目录（折叠）、账本目录、复制 Markdown
+
+卡片只读 `GET /api/{status,report}` + 写 `POST /api/config`；**不碰 key**——kit 与 lens 共用 `TYPESAFE_API_KEY`，密钥输入框只在 lens 卡片里有一处。
+
+### 一个值得记住的坑：client-modules 会缓存"否定答案"
+
+`clientModules.resolveMeta()` 对没有 `dsh.client` 的包会缓存 `null`：
+
+```js
+const cached = this.pkgMeta.get(sourceKey)
+if (cached !== undefined) return cached   // null 也被缓存，并永久返回
+```
+
+于是**先装 host 半边、后加浏览器半边的包，UI 永远不出现，且没有任何报错**（注入器只清自己那一条 pkgMeta，不管别人的）。kit 现在在 `apply()` 里清掉自己那条缓存（在引导图组合之前），并暴露 `POST /dsh-jev-kit/api/heal-client` 供随时修复。
+
 ## 预算与失败行为（与 lens 同一套纪律）
 
 | 轴 | 默认 |
@@ -135,7 +161,7 @@ jev_kit_pick { task: "个人资料编辑抽屉的邮箱段", candidates: [...], 
 ```bash
 npm install          # 或 bash scripts/link-deps.sh（借用本机已有的 harness，不联网）
 npm run build        # tsc → lib/
-npm test             # 17 项离线测试：无网络、无 key、无宿主
+npm test             # 24 项离线测试：无网络、无 key、无宿主（含浏览器半边的桩渲染）
 ```
 
 仓库提交了 `lib/`，所以 git 安装即使跳过构建也能直接用。

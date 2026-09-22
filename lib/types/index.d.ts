@@ -26,6 +26,21 @@ export interface Config extends KitSettings {
     ledgerDir: string;
     redact: boolean;
 }
+/**
+ * Structural view of `clientModules` — only the one repair this plugin needs.
+ *
+ * The service caches a *negative* answer: a package that had no `dsh.client` when
+ * it was first mounted is remembered as `null` forever, so adding a browser half
+ * later stays invisible until the process restarts (the injector clears only its
+ * own entry). Clearing ours is the whole fix, and it must happen before the graph
+ * is composed for this entry.
+ */
+export interface ClientModulesLike {
+    pkgMeta?: {
+        keys(): Iterable<string>;
+        delete(key: string): boolean;
+    };
+}
 /** Resolve the key from the credential store, then the environment, then a file. */
 export declare function resolveKey(config: Config, env?: NodeJS.ProcessEnv): {
     key: string;

@@ -79,6 +79,19 @@ const DEFAULTS: Config = {
   redact: true,
 }
 
+/**
+ * Structural view of `clientModules` — only the one repair this plugin needs.
+ *
+ * The service caches a *negative* answer: a package that had no `dsh.client` when
+ * it was first mounted is remembered as `null` forever, so adding a browser half
+ * later stays invisible until the process restarts (the injector clears only its
+ * own entry). Clearing ours is the whole fix, and it must happen before the graph
+ * is composed for this entry.
+ */
+export interface ClientModulesLike {
+  pkgMeta?: { keys (): Iterable<string>, delete (key: string): boolean }
+}
+
 /** One channel's result over one unit. */
 interface ItemResult {
   where: string
@@ -127,6 +140,22 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     })
   } catch { /* no credentials seam: the key comes from config, env or a file */ }
 
+  /** Drop this package's cached client metadata, if the service is reachable. */
+  function healClientMeta (scope: unknown): number {
+    try {
+      const clientModules = serviceOf<ClientModulesLike>(scope as KitContext, 'clientModules')
+      const meta = clientModules?.pkgMeta
+      if (!meta || typeof meta.delete !== 'function' || typeof meta.keys !== 'function') return 0
+      let cleared = 0
+      for (const key of [...meta.keys()]) {
+        if (String(key).includes(name)) { meta.delete(key); cleared++ }
+      }
+      return cleared
+    } catch {
+      return 0
+    }
+  }
+
   const state = {
     startedAt: Date.now(),
     sessionCalls: new Map<string, number>(),
@@ -140,9 +169,9 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
   let jev: Jev | null = null
   const auth = { fingerprint: '', at: 0, status: 0, message: '' }
 
-  const breaker = createBreaker({ failures: config.breakerFailures, cooldownMs: config.breakerCooldownMs })
+  let breaker = createBreaker({ failures: config.breakerFailures, cooldownMs: config.breakerCooldownMs })
   const limiter = createLimiter(config.concurrency)
-  const cache = createCache<{ verdict: Verdict, ms: number }>(config.cacheMaxEntries, config.cacheTtlMs)
+  let cache = createCache<{ verdict: Verdict, ms: number }>(config.cacheMaxEntries, config.cacheTtlMs)
 
   let extraKey = '\u0000unset'
   let extraCompiled: RegExp[] = []
@@ -346,6 +375,8 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
         cacheTtlMs: config.cacheTtlMs,
       },
       channels: CHANNEL_LIST.length,
+      /** Compact `GROUP:id` list, for the card's catalogue section. */
+      catalogue: CHANNEL_LIST.map(channel => `${channel.group}:${channel.id}`),
       health: {
         breakerOpen: breaker.state.open,
         failures: breaker.state.failures,
@@ -601,6 +632,20 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
       host.inject(['webServer'], (scope: KitContext) => {
         const server = serviceOf<WebServerLike>(scope, 'webServer') ?? scope.webServer
         if (!server || typeof server.register !== 'function') return
+        /** Read a small JSON body, bounded: a settings POST is never large. */
+        const readBody = async (req: WebRequestLike): Promise<unknown> => {
+          const chunks: Buffer[] = []
+          let size = 0
+          // The structural request view carries no iterator type, so the cast goes
+          // through `unknown`: the host hands us a real IncomingMessage here.
+          for await (const chunk of req as unknown as AsyncIterable<Buffer>) {
+            size += chunk.length
+            if (size > 64 * 1024) throw new Error('body too large')
+            chunks.push(chunk)
+          }
+          const raw = Buffer.concat(chunks).toString('utf8').trim()
+          return raw ? JSON.parse(raw) : {}
+        }
         const send = (res: WebResponseLike, status: number, body: unknown): void => {
           res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           res.end(JSON.stringify(body))
@@ -620,6 +665,33 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
                 const url = new URL(req.url ?? '/', 'http://127.0.0.1')
                 const days = Math.max(1, Math.min(90, Math.round(Number(url.searchParams.get('days') ?? 7)) || 7))
                 send(res, 200, { ok: true, days, report: summarize(load(ledgerDir, days), days), markdown: render(summarize(load(ledgerDir, days), days)) })
+                return
+              }
+              if (req.method === 'POST' && route === 'config') {
+                /*
+                 * The card's writes land here. Validated before anything is
+                 * applied: a settings POST that half-lands is worse than one that
+                 * is refused with the field name in the message.
+                 */
+                const patch = await readBody(req)
+                const merged = merge(config, patch)
+                const problem = validate(merged)
+                if (problem) { send(res, 400, { ok: false, error: problem }); return }
+                if (!saveStored(ledgerDir, merged)) { send(res, 500, { ok: false, error: `无法写入 ${ledgerDir}/config.json` }); return }
+                config = { ...config, ...merged }
+                /*
+                 * Rebuild rather than reconfigure: the copied breaker and cache are
+                 * immutable by design, and "the knobs just changed" is exactly when
+                 * stale failure counts and stale TTLs should not survive.
+                 */
+                breaker = createBreaker({ failures: config.breakerFailures, cooldownMs: config.breakerCooldownMs })
+                cache = createCache<{ verdict: Verdict, ms: number }>(config.cacheMaxEntries, config.cacheTtlMs)
+                send(res, 200, { ok: true, settings: { enabled: config.enabled, maxItems: config.maxItems, requestTimeoutMs: config.requestTimeoutMs, callBudgetMs: config.callBudgetMs, concurrency: config.concurrency, cacheTtlMs: config.cacheTtlMs } })
+                return
+              }
+              if (req.method === 'POST' && route === 'heal-client') {
+                const cleared = healClientMeta(ctx)
+                send(res, 200, { ok: true, cleared, note: cleared ? '已清理，下一次注入即可见' : '没有需要清理的条目' })
                 return
               }
               if (req.method === 'GET' && route === 'channels') {
@@ -677,6 +749,17 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     if (problem) logger?.warn?.(`[dsh-jev-kit] 已存设置不可用（${problem}），改用默认值`)
     else config = { ...config, ...candidate }
   }
+  /*
+   * Run the repair during apply, before the boot graph is composed for this
+   * entry — a plugin whose browser half was added after its first mount is
+   * otherwise invisible in the UI with no error anywhere.
+   */
+  const healedAt = healClientMeta(ctx)
+  if (healedAt) logger?.info?.(`[dsh-jev-kit] 已清理自身 client 元数据缓存 ${healedAt} 条`)
+  try {
+    ctx.inject?.(['clientModules'], (scope: KitContext) => { healClientMeta(scope) })
+  } catch { /* no client-modules service in this profile */ }
+
   installApi(ctx)
 }
 
