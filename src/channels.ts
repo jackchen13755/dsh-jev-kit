@@ -158,11 +158,11 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0.5,
     questions: () => ({
-      in_scope: noul('Is the change in `hunk` required by `task` — either to satisfy it directly or to fix something it necessarily breaks?',
+      in_scope: noul('Is the change in `text` (the diff hunk) required by `task` — either to satisfy it directly or to fix something it necessarily breaks?',
         'the change is required by the task',
         'the change is unrelated to the task, or is a drive-by improvement the task did not ask for'),
-      necessary: noul('Would `task` still be satisfied if `hunk` were reverted and nothing else changed?',
-        'reverting this change would leave the task unsatisfied',
+      necessary: noul('Would `task` still be satisfied if the hunk in `text` were reverted and nothing else changed?',
+        'reverting this hunk would leave the task unsatisfied',
         'reverting this change would still leave the task satisfied, so it is optional'),
     }),
     read: (answers, state) => {
@@ -233,10 +233,10 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0.6,
     questions: () => ({
-      contradicts: noul('Do `a` and `b` make conflicting claims — following one would mean violating the other?',
+      contradicts: noul('Do `text` and `other` make conflicting claims — following one would mean violating the other?',
         'they conflict: both cannot be followed at once',
         'they are compatible; they may overlap but do not conflict'),
-      duplicate: noul('Do `a` and `b` state the same fact, such that one of them is redundant?',
+      duplicate: noul('Do `text` and `other` state the same fact, such that one of them is redundant?',
         'the same fact stated twice',
         'different facts, even if they are about the same topic'),
     }),
@@ -263,10 +263,10 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'input',
     at: 0.8,
     questions: () => ({
-      answers: noul('Do `results` already contain everything `task` asks for, so that a final answer could be written right now without another tool call?',
+      answers: noul('Does `text` (the tool results) already contain everything `task` asks for, so that a final answer could be written right now without another tool call?',
         'every part of the request is already covered by the results',
         'at least one part of the request still needs another tool call'),
-      missing: noul('Is there a specific piece of information that `task` requires and `results` clearly lack?',
+      missing: noul('Is there a specific piece of information that `task` requires and `text` clearly lacks?',
         'a required piece is missing',
         'nothing required is missing'),
     }),
@@ -321,7 +321,7 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'input',
     at: 0.7,
     questions: () => ({
-      equivalent: noul('Is `call` equivalent to one of `prior` — same target and same intent, such that its result would already be known?',
+      equivalent: noul('Is the call in `text` equivalent to one of the earlier calls in `other` — same target and same intent, such that its result would already be known?',
         'yes: an earlier call already covers it',
         'no: it asks for something the earlier calls did not'),
     }),
@@ -344,7 +344,7 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'input',
     at: 0.5,
     questions: () => ({
-      cause: choice('What most likely caused `failure`?', {
+      cause: choice('What most likely caused the failure described in `text`?', {
         my_change: 'the change just made broke it',
         environment: 'the machine, network, permissions, or a missing tool',
         flaky: 'a non-deterministic test or timing issue',
@@ -372,6 +372,34 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     },
   },
 
+  retry: {
+    id: 'retry',
+    group: 'A',
+    title: '重试还是停',
+    intent: '杀掉"同样的命令再跑一遍"的重试循环：确定性失败重跑一百次也一样',
+    per: 'input',
+    at: 0.6,
+    questions: () => ({
+      plausible: noul('Is another attempt of `text`, unchanged, plausible to produce a different outcome?',
+        'plausible: the failure looks timing, network or resource dependent',
+        'implausible: the same attempt would fail in the same way'),
+      deterministic: noul('Does `text` name a deterministic cause — a wrong value, a missing symbol, a type error, a failing assertion about the change — rather than a transient one?',
+        'deterministic: the cause is visible in the output and will repeat',
+        'transient: nothing in the output explains a stable cause'),
+    }),
+    read: answers => {
+      const plausible = p(answers, 'plausible')
+      const deterministic = p(answers, 'deterministic')
+      const stop = (plausible ?? 0) < 0.5 || (deterministic ?? 0) >= 0.6
+      return {
+        level: stop ? 'warn' : 'info',
+        headline: stop ? '⚠️ 别重试，先改东西' : '可以再试一次',
+        details: [`retry_plausible=${show(plausible, 0.5)} deterministic=${show(deterministic, 0.6)}`],
+        values: { plausible, deterministic },
+      }
+    },
+  },
+
   evidence_check: {
     id: 'evidence_check',
     group: 'A',
@@ -383,9 +411,9 @@ export const CHANNELS: Record<string, ChannelSpec> = {
       const out: Record<string, JevQuestion> = {}
       const requirements = (state.requirements ?? []).slice(0, 6)
       requirements.forEach((requirement, index) => {
-        out[`r${index}`] = noul(`Does \`report\` contain evidence that satisfies this specific requirement: "${requirement.slice(0, 200)}"?`,
-          'the report shows concrete evidence for it',
-          'the report does not show evidence for it, or only asserts it')
+        out[`r${index}`] = noul(`Does \`text\` (the report) contain evidence that satisfies this specific requirement: "${requirement.slice(0, 200)}"?`,
+          'the text shows concrete evidence for it',
+          'the text does not show evidence for it, or only asserts it')
       })
       return out
     },
@@ -417,10 +445,10 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'input',
     at: 0.6,
     questions: () => ({
-      irreversible: noul('Would `action` cause an effect that cannot be undone — deleting data that is not reproducible, overwriting a remote, publishing, paying, or messaging a third party?',
+      irreversible: noul('Would the action in `text` cause an effect that cannot be undone — deleting data that is not reproducible, overwriting a remote, publishing, paying, or messaging a third party?',
         'the effect cannot be undone by re-running or restoring',
         'the effect is local and reversible, or touches only reproducible artifacts'),
-      external: noul('Does `action` affect anything outside this machine and this repository?',
+      external: noul('Does the action in `text` affect anything outside this machine and this repository?',
         'it reaches a remote system, a shared service, or another person',
         'it stays on this machine and in this working tree'),
     }),
@@ -445,7 +473,7 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0.5,
     questions: () => ({
-      kind: choice('What kind of a comment is `comment`?', {
+      kind: choice('What kind of a comment is `text`?', {
         blocking: 'it must be resolved before the change can land',
         nit: 'a stylistic preference that does not affect correctness',
         question: 'it asks for information rather than demanding a change',
@@ -470,10 +498,10 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'input',
     at: 0.5,
     questions: () => ({
-      matches: noul('Does `message` describe what `diff` actually changes?',
+      matches: noul('Does `text` (the commit message) describe what `other` (the diff) actually changes?',
         'the message describes the change accurately',
         'the message describes something else, or omits the main change'),
-      unrelated: noul('Does `diff` contain changes unrelated to what `message` describes?',
+      unrelated: noul('Does `other` (the diff) contain changes unrelated to what `text` describes?',
         'yes: there are changes the message does not account for',
         'no: every change in the diff is accounted for by the message'),
     }),
@@ -498,10 +526,10 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0.6,
     questions: () => ({
-      needs_decision: noul('Does `step` require a human decision that the agent cannot make on its own — a product tradeoff, a destructive choice, or spending money?',
+      needs_decision: noul('Does the step in `text` require a human decision that the agent cannot make on its own — a product tradeoff, a destructive choice, or spending money?',
         'a human must choose before this can proceed',
         'the step follows from the request; no new decision is needed'),
-      external: noul('Does `step` publish, deploy, message someone, or otherwise leave this machine irreversibly?',
+      external: noul('Does the step in `text` publish, deploy, message someone, or otherwise leave this machine irreversibly?',
         'yes: it has an irreversible external effect',
         'no: it is local and reversible'),
     }),
@@ -528,12 +556,12 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0.5,
     questions: () => ({
-      kind: choice('What is `line`?', {
+      kind: choice('What is the log line in `text`?', {
         error: 'an error or failure that matters',
         warn_act: 'a warning worth acting on',
         noise: 'normal output, progress, or noise',
       }),
-      actionable: noul('Does `line` point at something the reader should fix or investigate?',
+      actionable: noul('Does `text` point at something the reader should fix or investigate?',
         'yes: it names a problem to act on',
         'no: it is informational'),
     }),
@@ -555,7 +583,7 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0.6,
     questions: () => ({
-      same: noul('Is `alert` the same incident as `open` — the same underlying cause at the same place?',
+      same: noul('Is the alert in `text` the same incident as `other` — the same underlying cause at the same place?',
         'the same incident, described again',
         'a different incident, even if the symptoms look similar'),
     }),
@@ -577,7 +605,7 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0.5,
     questions: () => ({
-      kind: choice('What kind of problem does `report` describe?', {
+      kind: choice('What kind of problem does `text` (the report) describe?', {
         code: 'a logic or implementation defect',
         config: 'configuration, environment, or deployment',
         data: 'bad input data or an inconsistent dataset',
@@ -585,7 +613,7 @@ export const CHANNELS: Record<string, ChannelSpec> = {
         ux: 'a presentation or interaction problem',
         unclear: 'the description is not specific enough to tell',
       }),
-      reproducible: noul('Does `report` contain enough steps or evidence for someone to reproduce the problem?',
+      reproducible: noul('Does `text` contain enough steps or evidence for someone to reproduce the problem?',
         'yes: the steps are specific enough to follow',
         'no: it describes a symptom without a way to reproduce it'),
     }),
@@ -608,10 +636,10 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0.6,
     questions: () => ({
-      flaky: noul('Does `failure` look non-deterministic — a timeout, a race, an ordering dependency, or a resource contention — rather than a deterministic assertion about the change?',
+      flaky: noul('Does `text` (the failure output) look non-deterministic — a timeout, a race, an ordering dependency, or a resource contention — rather than a deterministic assertion about the change?',
         'yes: the shape points at non-determinism',
         'no: it reads as a deterministic failure caused by the change'),
-      assertion_related: noul('Does the failure name an assertion or behaviour that the recent change could plausibly have altered?',
+      assertion_related: noul('Does `text` name an assertion or behaviour that the recent change could plausibly have altered?',
         'yes: it is about something the change touched',
         'no: it is unrelated to what changed'),
     }),
@@ -658,6 +686,47 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     },
   },
 
+  i18n_key: {
+    id: 'i18n_key',
+    group: 'C',
+    title: 'i18n：新 key 是否多余 / 术语是否一致',
+    intent: '配合"只允许新增词条、不得改写现有文案"的纪律：先确认没有同义 key，再确认新词条不引入第二套说法',
+    per: 'input',
+    at: 0.5,
+    questions: state => {
+      const criteria: Record<string, string> = {}
+      ;(state.candidates ?? []).slice(0, 40).forEach((candidate, index) => { criteria[`k${index}`] = candidate.slice(0, 160) })
+      criteria.none = 'no existing key carries this meaning; a new key is justified'
+      return {
+        reuse: choice('Which existing key, if any, already carries the same meaning as `text`? Answer none if a new key is justified.', criteria),
+        consistent: noul('Does `text` use the same term for the same concept as `candidates` — the established wording in this locale?',
+          'consistent: it reuses the established term',
+          'inconsistent: it introduces a second way of saying something that already has a term'),
+      }
+    },
+    read: (answers, state) => {
+      const reuse = pickOf(answers, 'reuse')
+      const index = reuse !== undefined && /^k\d+$/.test(reuse) ? Number(reuse.slice(1)) : -1
+      const existing = index >= 0 ? (state.candidates ?? [])[index] : undefined
+      const consistent = p(answers, 'consistent')
+      if (existing !== undefined) {
+        return {
+          level: 'warn',
+          headline: `△ 已有同义 key，别新增：${existing.slice(0, 80)}`,
+          details: [`reuse=${reuse} consistent=${show(consistent)}`, '按纪律：只新增、不改写现有文案；同义时复用现有 key'],
+          values: { reuse, consistent },
+        }
+      }
+      const off = consistent !== undefined && consistent < 0.5
+      return {
+        level: off ? 'warn' : 'info',
+        headline: off ? '△ 可新增，但术语与既有说法不一致' : '✅ 可新增（无同义 key，术语一致）',
+        details: [`reuse=${reuse ?? '—'} consistent=${show(consistent, 0.5)}`],
+        values: { reuse, consistent },
+      }
+    },
+  },
+
   rank: {
     id: 'rank',
     group: 'C',
@@ -666,7 +735,7 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0,
     questions: () => ({
-      relevance: score('How relevant is `item` to `task`?', [
+      relevance: score('How relevant is `text` to `task`?', [
         'no connection at all',
         'tangential: shares vocabulary only',
         'somewhat related: same area, different concern',
@@ -690,7 +759,7 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     per: 'item',
     at: 0,
     questions: () => ({
-      answers_query: score('Does `memory` contain information that answers `query`?', [
+      answers_query: score('Does `text` (the memory) contain information that answers the query in `task`?', [
         'unrelated to the query',
         'same topic area but does not answer it',
         'partially answers it',

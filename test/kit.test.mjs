@@ -38,7 +38,7 @@ test('every channel is well formed and uniquely named', () => {
     assert.ok(channel.questions({ text: 'x', task: 'y', candidates: ['a'] }).constructor === Object)
   }
   // The catalogue is the product: if it shrinks, that is a decision, not an accident.
-  assert.ok(CHANNEL_LIST.length >= 20, `expected a full catalogue, got ${CHANNEL_LIST.length}`)
+  assert.ok(CHANNEL_LIST.length >= 23, `expected a full catalogue, got ${CHANNEL_LIST.length}`)
   for (const group of ['P', 'A', 'B', 'C', 'D']) {
     assert.ok(CHANNEL_LIST.some(channel => channel.group === group), `group ${group} is populated`)
   }
@@ -50,16 +50,22 @@ test('channel ids tolerate - and _ spelling drift', () => {
   assert.equal(channelOf('nope'), undefined)
 })
 
-test('every question names the state field it is about', () => {
-  // The wording is the calibration: a question that does not name its field makes
-  // the model guess which of several strings to look at.
+test('every backticked name in a question is a field the caller actually sends', () => {
+  /*
+   * The wording is the calibration, and a question that names a field the payload
+   * does not contain makes the model guess which string it means — a live call
+   * still answered correctly by luck, which is exactly why this is asserted rather
+   * than eyeballed. The canonical vocabulary is the whole ChannelState surface the
+   * tools populate.
+   */
+  const canonical = new Set(['text', 'task', 'other', 'candidates', 'requirements', 'candidateNoun', 'extra'])
   for (const channel of CHANNEL_LIST) {
-    const questions = channel.questions({ text: 'TEXT', task: 'TASK', other: 'OTHER', candidates: ['CAND'], requirements: ['REQ'] })
-    const text = JSON.stringify(questions)
-    const needsField = ['private_scan', 'scope_check', 'memory_write', 'sufficient', 'duplicate_call', 'risk', 'commit_message', 'log_triage', 'alert_dedup', 'flaky', 'rank', 'recall_rerank', 'review_triage', 'failure_triage', 'plan_risk', 'bug_triage']
-    if (needsField.includes(channel.id)) {
-      assert.ok(/`(text|hunk|task|results|call|prior|action|message|diff|line|alert|open|failure|item|memory|query|report|comment|step)`/.test(text),
-        `${channel.id} must reference its state field in backticks`)
+    const questions = channel.questions({ text: 'TEXT', task: 'TASK', other: 'OTHER', candidates: ['CAND'], requirements: ['REQ'], candidateNoun: 'thing' })
+    const serialized = JSON.stringify(questions)
+    const named = [...serialized.matchAll(/`([A-Za-z_][A-Za-z0-9_]*)`/g)].map(match => match[1])
+    assert.ok(named.length > 0, `${channel.id} should name the field it judges`)
+    for (const name of new Set(named)) {
+      assert.ok(canonical.has(name), `${channel.id} names \`${name}\`, which no tool ever sends (canonical: ${[...canonical].join(', ')})`)
     }
   }
 })
@@ -128,6 +134,28 @@ test('a missing answer is reported as unanswered, never as a negative', () => {
   assert.equal(verdict.values.secret, undefined)
   assert.ok((verdict.details ?? []).some(line => line.includes('未作答')))
   assert.equal(verdict.level, 'flag') // the one answered positive still counts
+})
+
+test('retry stops on a deterministic failure and allows one more try on a transient one', () => {
+  const read = (values) => CHANNELS.retry.read(answer(values), {})
+  assert.match(read({ plausible: 0.9, deterministic: 0.05 }).headline, /可以再试一次/)
+  assert.match(read({ plausible: 0.1, deterministic: 0.9 }).headline, /别重试/)
+  // Plausible on its own is not enough: a visible deterministic cause still stops.
+  assert.match(read({ plausible: 0.8, deterministic: 0.8 }).headline, /别重试/)
+})
+
+test('i18n_key prefers reusing an existing key over adding a synonym', () => {
+  const state = { candidates: ['profile.email.label: 邮箱', 'profile.email.invalid: 请输入有效的邮箱地址'] }
+  const reuse = CHANNELS.i18n_key.read(answer({ reuse: 'k1', consistent: 0.9 }), state)
+  assert.equal(reuse.level, 'warn')
+  assert.match(reuse.headline, /已有同义 key/)
+  assert.match(reuse.headline, /profile\.email\.invalid/)
+  const fresh = CHANNELS.i18n_key.read(answer({ reuse: 'none', consistent: 0.9 }), state)
+  assert.equal(fresh.level, 'info')
+  // New key but a second way of saying the same thing: warn, do not block.
+  const off = CHANNELS.i18n_key.read(answer({ reuse: 'none', consistent: 0.2 }), state)
+  assert.equal(off.level, 'warn')
+  assert.match(off.headline, /术语/)
 })
 
 /* ── splitters ───────────────────────────────────────────────────────── */

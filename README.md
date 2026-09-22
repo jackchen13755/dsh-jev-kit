@@ -1,6 +1,6 @@
 # dsh-jev-kit
 
-**Jev 决策工具箱** —— 把 TypeSafe Jev（不生成文本、只做类型化判断的 System One 模型）变成 **21 个可以随时调用的具名判断**，挂在 DeepSeek Harness 上。
+**Jev 决策工具箱** —— 把 TypeSafe Jev（不生成文本、只做类型化判断的 System One 模型）变成 **23 个可以随时调用的具名判断**，挂在 DeepSeek Harness 上。
 
 一句话定位：**它是"结构化的 if 语句"**。输入一段状态，输出「有没有 / 属于哪类 / 严重到几分」+ 概率，约 300–500ms。
 
@@ -27,6 +27,7 @@ dsh plugin --profile web add github:jackchen13755/dsh-jev-kit
 | **P** | `memory_write` | 值得记吗 / 哪一轨 | 记忆插件里那次"整段对话喂给 LLM"的往返（三问一次请求） |
 | **P** | `memory_conflict` | 两条记忆矛盾吗 / 重复吗 | 知识库清理 |
 | **A** | `sufficient` | 工具结果够答了吗 | 一整轮"再确认一下"（**只建议，不强制收束**） |
+| **A** | `retry` | 重试还是停 | 确定性失败上的重试循环 |
 | **A** | `route` | 这轮该用哪档模型 | 简单轮次占用强模型 |
 | **A** | `duplicate_call` | 与已有调用等价吗 | 重复 read/grep |
 | **A** | `failure_triage` | 归因：我的改动/环境/flaky/数据 | 一次"分析报错"的往返 |
@@ -40,6 +41,7 @@ dsh plugin --profile web add github:jackchen13755/dsh-jev-kit
 | **C** | `bug_triage` | 类型 + 可复现吗 | 进仓库前的人工读单 |
 | **C** | `flaky` | flaky 还是真回归 | 一次误判往返 |
 | **C** | `pick` | 在候选里选一个（**带 no-match 出口**） | 组件/测试/技能选择 |
+| **C** | `i18n_key` | 新 key 是否多余 / 术语是否一致 | 配合"只允许新增词条、不得改写现有文案"的纪律 |
 | **C** | `rank` | 相关度排序（**不设阈值**） | 粗排 |
 | **D** | `recall_rerank` | 这条记忆能回答这个 query 吗 | 召回重排（只排序） |
 | **D** | `tag_session` | 领域标签 + 是否有可复用教训 | LLM 起标题那一轮 |
@@ -117,6 +119,10 @@ jev_kit_pick { task: "个人资料编辑抽屉的邮箱段", candidates: [...], 
 | `memory_write` | 耐久事实 → worth 0.93、track=fact | 保持 |
 
 结论性口径：**第二个问题只有在证明能分离之后，才有资格参与判定。** 否则它只是把噪声引进结论。
+
+还有一条被断言钉住的规则：**问句里反引号点名的字段，必须是调用方真的会发的字段**（`text` / `task` / `other` / `candidates` / `requirements`）。
+写这条断言之前，有 8 个通道的问句点了 `failure`、`results`、`log line` 这类 payload 里不存在的名字——
+线上照样判对了，靠的是模型自己猜"它大概指那段唯一的文本"。**侥幸答对不算设计正确**，所以现在它是测试。
 
 ## 问句即标定
 
