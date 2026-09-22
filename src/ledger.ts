@@ -1,0 +1,135 @@
+/**
+ * The kit's ledger: one row per judgment, metadata only.
+ *
+ * It exists for the reason the whole toolkit exists measured rather than
+ * asserted: without a record of what was asked, what answered, how long it took
+ * and whether the caller acted on it, "Jev is useful here" is a feeling. No
+ * bodies: a redacted, capped excerpt at most, never the full text under judgment.
+ *
+ * @module dsh-jev-kit/ledger
+ */
+import fs from 'node:fs'
+import path from 'node:path'
+import { percentiles } from './resilience.js'
+
+export type LedgerRecord =
+  | {
+    t: number; kind: 'decision'; channel: string; group: string; level: string
+    /** The verdict's headline numbers (probabilities, choices, scores). */
+    values: Record<string, number | string | undefined>
+    ms?: number; via?: 'jev' | 'cache'; chars: number; item?: number
+    /** Set when the caller reported whether it acted on the advice. */
+    acted?: boolean
+  }
+  | { t: number; kind: 'degraded'; channel: string; reason: string }
+  | { t: number; kind: 'error'; channel: string; message: string }
+
+export const ledgerFile = (dir: string, when = new Date()): string =>
+  path.join(dir, `ledger-${when.toISOString().slice(0, 10)}.jsonl`)
+
+/** Append one row. Best-effort by design: measurement never breaks a task. */
+export function append (dir: string, record: LedgerRecord): void {
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.appendFileSync(ledgerFile(dir), JSON.stringify(record) + '\n')
+  } catch { /* a ledger write must never be the reason a task fails */ }
+}
+
+/** Load the last `days` daily files, oldest first. */
+export function load (dir: string, days: number, now = new Date()): LedgerRecord[] {
+  const out: LedgerRecord[] = []
+  for (let i = days - 1; i >= 0; i--) {
+    const file = ledgerFile(dir, new Date(now.getTime() - i * 86_400_000))
+    if (!fs.existsSync(file)) continue
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue
+      try { out.push(JSON.parse(line) as LedgerRecord) } catch { /* torn line */ }
+    }
+  }
+  return out.sort((a, b) => a.t - b.t)
+}
+
+export interface ChannelReport {
+  channel: string
+  group: string
+  n: number
+  /** How often the channel came back non-neutral. */
+  flagged: number
+  warn: number
+  cached: number
+  latency: { p50: number; p95: number; max: number; mean: number }
+  /** Of the rows where the caller said whether it acted. */
+  acted: number
+  actedYes: number
+}
+
+export interface KitReport {
+  window: { days: number; records: number }
+  total: number
+  cost: { inputTokens: number; usd: number; savedCalls: number }
+  channels: ChannelReport[]
+  health: { degraded: number; errors: number }
+}
+
+const mean = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0)
+
+/** Aggregate the ledger by channel — the only honest way to rank this catalogue. */
+export function summarize (records: LedgerRecord[], days: number, usdPerMTok = 0.042): KitReport {
+  const decisions = records.filter((r): r is Extract<LedgerRecord, { kind: 'decision' }> => r.kind === 'decision')
+  const byChannel = new Map<string, Extract<LedgerRecord, { kind: 'decision' }>[]>()
+  for (const row of decisions) {
+    const list = byChannel.get(row.channel) ?? []
+    list.push(row)
+    byChannel.set(row.channel, list)
+  }
+  const channels: ChannelReport[] = [...byChannel.entries()].map(([channel, rows]) => ({
+    channel,
+    group: rows[0]?.group ?? '?',
+    n: rows.length,
+    flagged: rows.filter(r => r.level === 'flag').length,
+    warn: rows.filter(r => r.level === 'warn').length,
+    cached: rows.filter(r => r.via === 'cache').length,
+    latency: percentiles(rows.map(r => r.ms ?? 0).filter(ms => ms > 0)),
+    acted: rows.filter(r => r.acted !== undefined).length,
+    actedYes: rows.filter(r => r.acted === true).length,
+  })).sort((a, b) => b.n - a.n)
+
+  // Tokens are not recorded per row (the state size is), so the cost shown is an
+  // estimate at the documented rate rather than a measurement pretending to be one.
+  const chars = decisions.reduce((sum, r) => sum + r.chars, 0)
+  const inputTokens = Math.round(chars / 4)
+  return {
+    window: { days, records: records.length },
+    total: decisions.length,
+    cost: { inputTokens, usd: Number(((inputTokens * usdPerMTok) / 1e6).toFixed(6)), savedCalls: decisions.filter(r => r.via === 'cache').length },
+    channels,
+    health: {
+      degraded: records.filter(r => r.kind === 'degraded').length,
+      errors: records.filter(r => r.kind === 'error').length,
+    },
+  }
+}
+
+/** Human-readable report. */
+export function render (report: KitReport): string {
+  const lines = [
+    '**dsh-jev-kit · Jev 决策工具箱**',
+    `窗口：最近 ${report.window.days} 天 · ${report.total} 次判断 · 估算成本 $${report.cost.usd}（≈${report.cost.inputTokens} input tok）· 命中缓存 ${report.cost.savedCalls}`,
+    '',
+    '| 通道 | 组 | 次数 | ⚠️flag | △warn | 缓存 | p50 | p95 |',
+    '|---|---|---|---|---|---|---|---|',
+  ]
+  for (const channel of report.channels) {
+    lines.push(`| ${channel.channel} | ${channel.group} | ${channel.n} | ${channel.flagged} | ${channel.warn} | ${channel.cached} | ${channel.latency.p50}ms | ${channel.latency.p95}ms |`)
+  }
+  if (!report.channels.length) lines.push('| （还没有判断记录） | | | | | | | |')
+  lines.push(
+    '',
+    report.health.degraded || report.health.errors
+      ? `⚠️ 降级 ${report.health.degraded} · 失败 ${report.health.errors}（失败永远不记成"没问题"）`
+      : '无降级、无失败',
+    '',
+    '读法：**这个表是用来淘汰通道的**。某个通道次数不少但 flag/warn 长期为 0，说明它在你的语料上不产生信息——那就别用了，别留着自我安慰。',
+  )
+  return lines.join('\n')
+}

@@ -1,0 +1,125 @@
+# dsh-jev-kit
+
+**Jev 决策工具箱** —— 把 TypeSafe Jev（不生成文本、只做类型化判断的 System One 模型）变成 **22 个可以随时调用的具名判断**，挂在 DeepSeek Harness 上。
+
+一句话定位：**它是"结构化的 if 语句"**。输入一段状态，输出「有没有 / 属于哪类 / 严重到几分」+ 概率，约 300–500ms。
+
+```bash
+dsh plugin --profile web add github:jackchen13755/dsh-jev-kit
+```
+
+装完重启 `dsh web`。key 与 `dsh-jev-lens` **共用同一个凭据引用**（`TYPESAFE_API_KEY`），配过一次即可。
+
+## 它不做什么（比它做什么更重要）
+
+- **不生成文本**：它给概率和分类，不给理由、不写代码。
+- **不拦截、不改写、不问你**：纯建议。所以它不受审批策略影响——不会出现"approval=never 时 ask 悄悄变成拒绝、还谎称用户拒绝"那种事。
+- **不注册任何 hook**：只注册工具。这意味着热重载它**不会**触发"工具调用内 dispose 自己"的自噬死锁。
+
+## 通道目录
+
+`jev_kit_channels` 列出全部；`jev_kit_decide` 是通用入口（任何通道都能从它调用）。
+
+| 组 | 通道 | 判断 | 替掉什么 |
+|---|---|---|---|
+| **P** | `private_scan` | 凭据 / 个人信息 / 内网信息 | 正则扫不到的**语义**泄漏；`jev_kit_scan_private` 只扫 diff 的新增行 |
+| **P** | `scope_check` | 这个 hunk 属于本任务吗 | 「只改要求改的地方」的人工复核；`jev_kit_scope_check` 逐 hunk |
+| **P** | `memory_write` | 值得记吗 / 哪一轨 | 记忆插件里那次"整段对话喂给 LLM"的往返（三问一次请求） |
+| **P** | `memory_conflict` | 两条记忆矛盾吗 / 重复吗 | 知识库清理 |
+| **A** | `sufficient` | 工具结果够答了吗 | 一整轮"再确认一下"（**只建议，不强制收束**） |
+| **A** | `route` | 这轮该用哪档模型 | 简单轮次占用强模型 |
+| **A** | `duplicate_call` | 与已有调用等价吗 | 重复 read/grep |
+| **A** | `failure_triage` | 归因：我的改动/环境/flaky/数据 | 一次"分析报错"的往返 |
+| **A** | `evidence_check` | 报告含所需证据吗（按条批量） | 一次复核子 agent 报告的 LLM 往返 |
+| **B** | `risk` | 有不可逆的外部副作用吗 | 执行前的人工风险判断 |
+| **B** | `review_triage` | 评审意见：阻塞/小问题/提问 | 人工分级 |
+| **B** | `commit_message` | 提交信息与 diff 相符吗 / 夹带改动吗 | 提交前检查 |
+| **B** | `plan_risk` | 这一步要用户拍板吗 | 执行到一半才停下来问 |
+| **C** | `log_triage` | 日志：错误/值得处理/噪声 | 人读几千行日志 |
+| **C** | `alert_dedup` | 与未闭环告警同一件事吗 | 告警折叠 |
+| **C** | `bug_triage` | 类型 + 可复现吗 | 进仓库前的人工读单 |
+| **C** | `flaky` | flaky 还是真回归 | 一次误判往返 |
+| **C** | `pick` | 在候选里选一个（**带 no-match 出口**） | 组件/测试/技能选择 |
+| **C** | `rank` | 相关度排序（**不设阈值**） | 粗排 |
+| **D** | `recall_rerank` | 这条记忆能回答这个 query 吗 | 召回重排（只排序） |
+| **D** | `tag_session` | 领域标签 + 是否有可复用教训 | LLM 起标题那一轮 |
+
+## 工具
+
+| 工具 | 用途 |
+|---|---|
+| `jev_kit_channels [group]` | 列出目录（先看这个） |
+| `jev_kit_decide { channel, text, task, candidates, requirements }` | 通用入口：跑任意通道 |
+| `jev_kit_scan_private { diff \| text }` | **优先事项 1**：推送前语义隐私扫描（diff 只扫新增行） |
+| `jev_kit_scope_check { task, diff }` | **优先事项 3**：逐 hunk 范围门禁 |
+| `jev_kit_memory { mode: write\|conflict\|rerank }` | **优先事项 2** + 组 D |
+| `jev_kit_triage { kind: log\|alert\|bug\|flaky, items, context }` | 组 C：批量分诊 + 汇总 |
+| `jev_kit_pick { task, candidates, noun }` | 组 C：带 no-match 的选择 |
+| `jev_kit_status` / `jev_kit_report [days]` | 运行态 / 按通道的账本报告 |
+| `/jev-kit channels\|report\|status` | 同上，命令行 |
+
+HTTP（给卡片或 curl 用）：`GET /dsh-jev-kit/api/{status,report?days=7,channels}`
+
+## 用法示例
+
+```
+# 推送前的语义扫描（配合你的正则扫描，两者互补）
+jev_kit_scan_private { diff: <git diff 输出> }
+
+# 提交前：这段改动是否超出了任务范围
+jev_kit_scope_check { task: "修 5921 下拉没数据", diff: <git diff> }
+
+# 记忆写入路由：值得记吗 / 哪一轨
+jev_kit_memory { mode: "write", text: "本机 bash 沙箱不能写 ~/.dsh，插件台账只能由宿主写" }
+
+# 1000 行日志分诊
+jev_kit_triage { kind: "log", items: [...], maxItems: 200 }
+
+# 组件选择（带 no-match）
+jev_kit_pick { task: "个人资料编辑抽屉的邮箱段", candidates: [...], noun: "component" }
+```
+
+## 预算与失败行为（与 lens 同一套纪律）
+
+| 轴 | 默认 |
+|---|---|
+| 单次请求硬上限 | 8000ms（401/403 不重试；429/5xx 退避重试 1 次） |
+| 单次**工具调用**总预算 | 90s（超时提前结束并说明） |
+| 单次调用判定条数 | ≤ 40（diff 会被切成"新增行分组"，不会一行一个请求） |
+| 并发 | 4 |
+| 熔断 | 连续 3 次失败 → 冷却 120s |
+| 缓存 | 15 分钟（同样的 state 同样的答案；命中不花钱） |
+| 预算 | 单会话 2000 / 每日 20000 次 |
+| 失败 | **一律 fail-open**：判定不了就返回"未能判定"，绝不冒充"没问题" |
+
+判定失败会写成 `error` 行、跳过会写成 `degraded` 行——所以报告里的比例不会因为接口挂了而虚高，但样本会变少（`jev_kit_status` 的"跳过原因"表就是看这个的）。
+
+## 账本：用它淘汰通道
+
+`$DSH_HOME/storages/dsh_jev_kit/ledger-YYYY-MM-DD.jsonl`，只记元数据（通道、判定档位、概率/选择、耗时、是否命中缓存），**不含正文**。
+
+`jev_kit_report` 会把每个通道的次数、flag/warn 数、延迟 p50/p95 列出来。读法就一句：
+
+> **某个通道跑了很多次却长期没有非中性判定，说明它在你的语料上不产生信息 —— 那就别用它。**
+
+通道是可以删的，留着不产生信息的通道只是在自我安慰。这也是这个仓库存在的意义：**先量，再留**。
+
+## 问句即标定
+
+所有问句都写成**"有没有 / 属于哪类"**（presence），不是"有多相关"（relevance）。原因是本机实测：36 段真实代码喂进去判"相关吗"，p 全挤在 0.02–0.66、没有分离度，按 0.5 切会丢掉 75%——而"干净页面有没有注入指令"这类**存在性**判断是 0/20 误报、10/10 命中。
+
+词句改动等于重新标定：`jev_kit_decide` 的缓存键包含插件版本，所以升级后旧缓存不会串味。
+
+## 构建 / 测试
+
+```bash
+npm install          # 或 bash scripts/link-deps.sh（借用本机已有的 harness，不联网）
+npm run build        # tsc → lib/
+npm test             # 17 项离线测试：无网络、无 key、无宿主
+```
+
+仓库提交了 `lib/`，所以 git 安装即使跳过构建也能直接用。
+
+## License
+
+BSD-3-Clause

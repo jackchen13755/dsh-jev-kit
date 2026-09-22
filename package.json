@@ -1,0 +1,53 @@
+{
+  "name": "@dsh-external/dsh-jev-kit",
+  "version": "0.1.0",
+  "description": "Jev decision toolkit for DeepSeek Harness: 22 named, typed judgments (privacy scan, change-scope, memory triage, batch log/bug/alert triage, agent-loop checks) built on one hardened, budgeted, ledger-backed transport. Advisory only — it never blocks.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./channels": {
+      "types": "./lib/types/channels.d.ts",
+      "default": "./lib/channels.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "jev",
+    "typesafe",
+    "classifier",
+    "triage",
+    "privacy-scan",
+    "agent-tools"
+  ],
+  "license": "BSD-3-Clause",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
+    "cordis": ">=4.0.0-rc <5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/",
+    "link-deps": "bash scripts/link-deps.sh",
+    "prepare": "bash scripts/build.sh || node -e \"console.log('prepare: build skipped — the committed lib/ is used as-is; run npm run build to refresh it')\""
+  }
+}
