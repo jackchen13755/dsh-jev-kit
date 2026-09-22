@@ -560,6 +560,9 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     parameters: {},
     output: textOut,
     async execute () {
+      // Resolve the credential first: a status that reports "missing" merely
+      // because nothing has asked yet is a status that lies about its own state.
+      await ensureJev()
       const payload = statusPayload()
       const policy = `enabled=${config.enabled} · model=${config.model} · 通道 ${CHANNEL_LIST.length} 个`
       return [
@@ -608,7 +611,11 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
           handler: async (req: WebRequestLike, res: WebResponseLike) => {
             const route = new URL(req.url ?? '/', 'http://127.0.0.1').pathname.slice(API_PREFIX.length).replace(/^\/+/, '')
             try {
-              if (req.method === 'GET' && (route === 'status' || route === '')) { send(res, 200, statusPayload()); return }
+              if (req.method === 'GET' && (route === 'status' || route === '')) {
+                await ensureJev() // same reason as the tool: never report "missing" before looking
+                send(res, 200, statusPayload())
+                return
+              }
               if (req.method === 'GET' && route === 'report') {
                 const url = new URL(req.url ?? '/', 'http://127.0.0.1')
                 const days = Math.max(1, Math.min(90, Math.round(Number(url.searchParams.get('days') ?? 7)) || 7))

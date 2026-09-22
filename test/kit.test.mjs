@@ -79,8 +79,14 @@ test('private_scan flags a secret and stays quiet on placeholders', () => {
 test('scope_check treats a low in_scope as out of scope', () => {
   const read = (values) => CHANNELS.scope_check.read(answer(values), { text: 'h' })
   assert.equal(read({ in_scope: 0.1, necessary: 0.1 }).level, 'flag')
-  assert.equal(read({ in_scope: 0.9, necessary: 0.1 }).level, 'warn') // in scope but not required
+  /*
+   * `necessary` must NOT drive the level: measured live, it scored 0.20 on the
+   * change the task explicitly asked for, which would have made a correct verdict
+   * amber. Only in_scope decides.
+   */
+  assert.equal(read({ in_scope: 0.83, necessary: 0.2 }).level, 'info')
   assert.equal(read({ in_scope: 0.9, necessary: 0.9 }).level, 'info')
+  assert.match(read({ in_scope: 0.9, necessary: 0.1 }).details[0], /不参与判定/)
 })
 
 test('sufficient only says stop when coverage is high AND nothing is missing', () => {
