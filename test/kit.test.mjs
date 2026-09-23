@@ -15,7 +15,7 @@ import path from 'node:path'
 
 import { CHANNELS, CHANNEL_LIST, channelOf, DEFAULT_THRESHOLDS } from '../lib/channels.js'
 import { isDiff, diffUnits, textUnits, hunksOf, unitsOf } from '../lib/segments.js'
-import { append, load, summarize, render } from '../lib/ledger.js'
+import { append, load, summarize, render, verdictOf, MIN_SAMPLE } from '../lib/ledger.js'
 import { KIT_DEFAULTS, merge, validate, loadStored, saveStored } from '../lib/settings.js'
 import { trimState } from '../lib/engines.js'
 

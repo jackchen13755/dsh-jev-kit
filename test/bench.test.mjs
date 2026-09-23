@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { COMMAND_FIXTURES, FIXTURES, check, fitThresholds, fittedTable, questionHash, questionsFor, renderBench, separation, setThresholdOverrides, summarizeEngine, thresholdOf, verdictFor, wordingDrift } from '../lib/bench.js'
+import { COMMAND_FIXTURES, FITTABLE_SEPARATION, FIXTURES, check, fitThresholds, fitVerdictOf, fittedTable, questionHash, questionsFor, renderBench, separation, setThresholdOverrides, summarizeEngine, thresholdOf, verdictFor, wordingDrift } from '../lib/bench.js'
 import { CHANNEL_LIST, channelOf } from '../lib/channels.js'
 import { selectEngines } from '../lib/engines.js'
 import { percentiles } from '@dsh-external/dsh-jev-core'
@@ -249,4 +249,45 @@ test('an unknown engine id surfaces instead of being silently dropped', () => {
   assert.deepEqual(picked.engines.map(engine => engine.id), ['jev', 'laya'])
   assert.deepEqual(picked.unknown, ['nope'])
   assert.deepEqual(selectEngines(['  JEV '], known).engines.map(engine => engine.id), ['jev'], 'case and space tolerant')
+})
+
+test('a fit is only offered when it survives the held-out folds', () => {
+  /*
+   * Three different answers, and giving the wrong one is its own kind of lie: a
+   * channel can order its cases perfectly and still need no change, and a channel
+   * that barely orders them has a "best" cut that is an artefact of which case
+   * happened to land where. The card and the bench report both read this one rule.
+   */
+  const good = { trustworthy: true, changes: true, accuracyNow: 0.8, accuracyFitted: 0.95 }
+  assert.ok(FITTABLE_SEPARATION > 0 && FITTABLE_SEPARATION < 1)
+  assert.equal(fitVerdictOf({ ...good, separation: FITTABLE_SEPARATION - 0.01 }), 'noisy', 'below the bar nothing is calibrated')
+  assert.equal(fitVerdictOf({ ...good, separation: FITTABLE_SEPARATION }), 'adjustable', 'the bar itself is fittable')
+  assert.equal(fitVerdictOf({ ...good, separation: 0.9, trustworthy: false }), 'optimal', 'separated, but the gain did not hold out')
+  assert.equal(fitVerdictOf({ ...good, separation: 0.9, changes: false }), 'optimal', 'no decision changes, so there is nothing to do')
+  assert.equal(fitVerdictOf({ ...good, separation: 0.9, accuracyFitted: 0.81 }), 'optimal', 'an in-sample gain of 1 point is not a reason to retune')
+  assert.equal(fitVerdictOf({ ...good, separation: 0.9, accuracyFitted: 0.83 }), 'adjustable', 'more than 2 points is')
+  // A missing separation is not a free pass to retune.
+  assert.equal(fitVerdictOf({ ...good, separation: undefined }), 'noisy')
+})
+
+test('a fit states the cut it actually scored, not the default it was handed', () => {
+  /*
+   * The row is read as "current → suggested". Printing the declared default while
+   * scoring at the applied override made two already-applied cuts look like work
+   * still to do, and the number shown was one the accuracy beside it never measured.
+   */
+  setThresholdOverrides({ flaky: 0.37 })
+  try {
+    const trials = FIXTURES.filter(fixture => fixture.channel === 'flaky').map(fixture => ({
+      engine: 'jev', channel: fixture.channel, fixture: fixture.id, ok: true,
+      value: fixture.expect.level === 'flag' ? 0.9 : 0.1, level: fixture.expect.level,
+    }))
+    const fits = fitThresholds(FIXTURES, trials)
+    const flaky = fits.find(fit => fit.channel === 'flaky')
+    if (flaky) assert.equal(flaky.current, 0.37, 'the row reports the cut in force, which is what accuracyNow was measured at')
+    assert.equal(thresholdOf('flaky'), 0.37)
+  } finally {
+    setThresholdOverrides({})
+  }
+  assert.equal(thresholdOf('flaky', 0.6), 0.6, 'and with no override the declared default still wins')
 })

@@ -36,7 +36,7 @@ import {
 import { CHANNEL_LIST, channelOf, setReaderThresholds, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
 import { hunksOf, unitsOf, type Unit } from './segments.js'
 import { jevEngine, layaEngine, selectEngines, trimState, type Engine } from './engines.js'
-import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, fittedTable, setThresholdOverrides, thresholdOverrides, questionHash, questionHashes, wordingDrift, type BenchRecord, type Fixture, type ThresholdFit, type Trial } from './bench.js'
+import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, fittedTable, fitVerdictOf, setThresholdOverrides, thresholdOverrides, thresholdOf, questionHash, questionHashes, wordingDrift, type BenchRecord, type Fixture, type ThresholdFit, type Trial } from './bench.js'
 import { append, load, render, summarize, type LedgerRecord } from './ledger.js'
 import { KIT_DEFAULTS, loadStored, merge, saveStored, validate, type KitSettings } from './settings.js'
 
@@ -1144,7 +1144,18 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                   ok: true,
                   applied: thresholdOverrides(),
                   suggested: record?.thresholds ?? {},
-                  details: record?.details ?? [],
+                  /*
+                   * Derived on the way out as well as at fit time. Two reasons:
+                   * a record written by an older build has no verdict on it, and a
+                   * record can predate the apply — so a fit whose recommendation is
+                   * *already the cut in force* has nothing left to do and must not keep
+                   * offering itself as a suggestion.
+                   */
+                  details: (record?.details ?? []).map(fit => {
+                    const inForce = thresholdOf(fit.channel, fit.current)
+                    const done = Number.isFinite(inForce) && Math.abs(inForce - fit.recommended) < 1e-9
+                    return { ...fit, current: inForce, alreadyInForce: done, level: done ? 'optimal' : fitVerdictOf(fit) }
+                  }),
                   at: record?.at ?? null,
                   fixtures: record?.fixtures ?? 0,
                   wordingDrift: wordingDrift(record),

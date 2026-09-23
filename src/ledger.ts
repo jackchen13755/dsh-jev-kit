@@ -70,6 +70,40 @@ export function load (dir: string, days: number, now = new Date()): LedgerRecord
   return out.sort((a, b) => a.t - b.t)
 }
 
+/** Sample size below which a channel's silence means nothing. */
+export const MIN_SAMPLE = 20
+
+/**
+ * The one recommendation this table makes about a channel.
+ *
+ * `useful` is not a euphemism: a channel earns its keep by coming back non-neutral,
+ * and that is what its marker draws the eye to.
+ */
+export type Verdict = 'useful' | 'warn' | 'retire' | 'thin'
+
+/**
+ * Judged from the counts, in one place.
+ *
+ * The card, the copied Markdown and `/jev-kit report` all render this table, so "when
+ * do I retire a channel" is decided once here — two implementations of it drift the
+ * moment one of them is edited, which is the same failure mode as a route and its
+ * client disagreeing about a payload.
+ *
+ * @param row - the counts that decide it.
+ * @returns the verdict.
+ */
+export const verdictOf = (row: { n: number, flagged: number, warn: number }): Verdict =>
+  row.flagged > 0 ? 'useful' : row.warn > 0 ? 'warn' : row.n >= MIN_SAMPLE ? 'retire' : 'thin'
+
+/**
+ * Colour marker per verdict.
+ *
+ * The report is read in Markdown and in a terminal, where a row cannot be coloured, so
+ * the marker has to survive copy-paste — which is why the levels get a symbol rather
+ * than staying implicit in the numbers.
+ */
+export const VERDICT_MARK: Record<Verdict, string> = { useful: '🔴', warn: '🟡', retire: '⬛', thin: '⚪' }
+
 export interface ChannelReport {
   channel: string
   group: string
@@ -77,6 +111,8 @@ export interface ChannelReport {
   /** How often the channel came back non-neutral. */
   flagged: number
   warn: number
+  /** What to do about it — see {@link verdictOf}. */
+  level: Verdict
   cached: number
   latency: { p50: number; p95: number; max: number; mean: number }
   /** Of the rows where the caller said whether it acted. */
@@ -121,17 +157,23 @@ export function summarize (records: LedgerRecord[], days: number, usdPerMTok = 0
     list.push(row)
     byChannel.set(row.channel, list)
   }
-  const channels: ChannelReport[] = [...byChannel.entries()].map(([channel, rows]) => ({
-    channel,
-    group: rows[0]?.group ?? '?',
-    n: rows.length,
-    flagged: rows.filter(r => r.level === 'flag').length,
-    warn: rows.filter(r => r.level === 'warn').length,
-    cached: rows.filter(r => r.via === 'cache').length,
-    latency: percentiles(rows.map(r => r.ms ?? 0).filter(ms => ms > 0)),
-    acted: rows.filter(r => r.acted !== undefined).length,
-    actedYes: rows.filter(r => r.acted === true).length,
-  })).sort((a, b) => b.n - a.n)
+  const channels: ChannelReport[] = [...byChannel.entries()].map(([channel, rows]) => {
+    const n = rows.length
+    const flagged = rows.filter(r => r.level === 'flag').length
+    const warn = rows.filter(r => r.level === 'warn').length
+    return {
+      channel,
+      group: rows[0]?.group ?? '?',
+      n,
+      flagged,
+      warn,
+      level: verdictOf({ n, flagged, warn }),
+      cached: rows.filter(r => r.via === 'cache').length,
+      latency: percentiles(rows.map(r => r.ms ?? 0).filter(ms => ms > 0)),
+      acted: rows.filter(r => r.acted !== undefined).length,
+      actedYes: rows.filter(r => r.acted === true).length,
+    }
+  }).sort((a, b) => b.n - a.n)
 
   // Tokens are not recorded per row (the state size is), so the cost shown is an
   // estimate at the documented rate rather than a measurement pretending to be one.
@@ -181,14 +223,16 @@ export function render (report: KitReport): string {
     '**dsh-jev-kit · Jev 决策工具箱**',
     `窗口：最近 ${report.window.days} 天 · ${report.total} 次判断 · 估算成本 $${report.cost.usd}（≈${report.cost.inputTokens} input tok）· 命中缓存 ${report.cost.savedCalls}`,
     '',
-    '| 通道 | 组 | 次数 | ⚠️flag | △warn | 缓存 | p50 | p95 |',
-    '|---|---|---|---|---|---|---|---|',
+    '| 判定 | 通道 | 组 | 次数 | ⚠️flag | △warn | 缓存 | p50 | p95 |',
+    '|---|---|---|---|---|---|---|---|---|',
   ]
   for (const channel of report.channels) {
-    lines.push(`| ${channel.channel} | ${channel.group} | ${channel.n} | ${channel.flagged} | ${channel.warn} | ${channel.cached} | ${channel.latency.p50}ms | ${channel.latency.p95}ms |`)
+    lines.push(`| ${VERDICT_MARK[channel.level]} | ${channel.channel} | ${channel.group} | ${channel.n} | ${channel.flagged} | ${channel.warn} | ${channel.cached} | ${channel.latency.p50}ms | ${channel.latency.p95}ms |`)
   }
-  if (!report.channels.length) lines.push('| （还没有判断记录） | | | | | | | |')
+  if (!report.channels.length) lines.push('| （还没有判断记录） | | | | | | | | |')
   lines.push(
+    '',
+    `判定：🔴 有命中（去看它抓到了什么）· 🟡 只有 warn（观察）· ⬛ 样本够了却从未非中性（淘汰或改问句——本表唯一的行动项）· ⚪ 样本不足（不表态，样本 < ${MIN_SAMPLE}）`,
     '',
     report.health.degraded || report.health.errors
       ? `⚠️ 降级 ${report.health.degraded} · 失败 ${report.health.errors}（失败永远不记成"没问题"）`

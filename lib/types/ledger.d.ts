@@ -56,6 +56,39 @@ export declare const ledgerFile: (dir: string, when?: Date) => string;
 export declare function append(dir: string, record: LedgerRecord): void;
 /** Load the last `days` daily files, oldest first. */
 export declare function load(dir: string, days: number, now?: Date): LedgerRecord[];
+/** Sample size below which a channel's silence means nothing. */
+export declare const MIN_SAMPLE = 20;
+/**
+ * The one recommendation this table makes about a channel.
+ *
+ * `useful` is not a euphemism: a channel earns its keep by coming back non-neutral,
+ * and that is what its marker draws the eye to.
+ */
+export type Verdict = 'useful' | 'warn' | 'retire' | 'thin';
+/**
+ * Judged from the counts, in one place.
+ *
+ * The card, the copied Markdown and `/jev-kit report` all render this table, so "when
+ * do I retire a channel" is decided once here — two implementations of it drift the
+ * moment one of them is edited, which is the same failure mode as a route and its
+ * client disagreeing about a payload.
+ *
+ * @param row - the counts that decide it.
+ * @returns the verdict.
+ */
+export declare const verdictOf: (row: {
+    n: number;
+    flagged: number;
+    warn: number;
+}) => Verdict;
+/**
+ * Colour marker per verdict.
+ *
+ * The report is read in Markdown and in a terminal, where a row cannot be coloured, so
+ * the marker has to survive copy-paste — which is why the levels get a symbol rather
+ * than staying implicit in the numbers.
+ */
+export declare const VERDICT_MARK: Record<Verdict, string>;
 export interface ChannelReport {
     channel: string;
     group: string;
@@ -63,6 +96,8 @@ export interface ChannelReport {
     /** How often the channel came back non-neutral. */
     flagged: number;
     warn: number;
+    /** What to do about it — see {@link verdictOf}. */
+    level: Verdict;
     cached: number;
     latency: {
         p50: number;

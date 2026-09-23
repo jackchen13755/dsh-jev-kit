@@ -308,6 +308,36 @@ export const questionHashes = (): Record<string, string> =>
 /** Separation below which a fitted threshold is noise rather than calibration. */
 export const FITTABLE_SEPARATION = 0.75
 
+/**
+ * What to do about a fitted cut — the three states, decided in one place.
+ *
+ * `bench`'s own report and the settings card show the same fits, so the rule lives
+ * here rather than in each renderer: two copies of it drift, and a drifted threshold
+ * rule silently retunes a channel. The three states are different answers, and
+ * giving the wrong one is its own kind of lie:
+ *
+ *   · `noisy`      — separation too low; the "best" cut here is an artefact of which
+ *                    case happened to land where. Do not follow it.
+ *   · `adjustable` — separated, and moving the cut gains more than two points on the
+ *                    held-out folds.
+ *   · `optimal`    — separated, but moving it gains no more than two points out of
+ *                    sample: the current value is already the held-out optimum.
+ */
+export type FitVerdict = 'adjustable' | 'optimal' | 'noisy'
+
+/**
+ * @param fit - a fitted threshold row.
+ * @returns which of the three states it is in.
+ */
+export const fitVerdictOf = (fit: { separation?: number, trustworthy: boolean, changes: boolean, accuracyNow: number, accuracyFitted: number }): FitVerdict => {
+  if ((fit.separation ?? 0) < FITTABLE_SEPARATION) return 'noisy'
+  return fit.trustworthy && fit.changes && fit.accuracyFitted > fit.accuracyNow + 0.02 ? 'adjustable' : 'optimal'
+}
+
+/** Colour marker per fit verdict — the same reason the channel table has one: colour
+ *  does not survive a copy-paste, and a recommendation has to survive the trip. */
+export const FIT_VERDICT_MARK: Record<FitVerdict, string> = { adjustable: '🟢', optimal: '⚪', noisy: '⬛' }
+
 /*
  * Effective thresholds: the hand-picked defaults, plus whatever the corpus fitted.
  * Kept module-level and overridable so a fitted table can be *applied* without
@@ -412,7 +442,13 @@ export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Re
     const sep = separation(pairs.filter(pair => pair.high).map(pair => pair.value), pairs.filter(pair => !pair.high).map(pair => pair.value))
     out.push({
       channel,
-      current: current[channel] ?? 0.5,
+      /*
+       * The cut the "now" column was actually scored at — `thresholdOf`, the same call
+       * line 393 uses — not the raw default it was passed. Printing one value and
+       * measuring another made two already-applied cuts read as "current 0.50,
+       * suggested 0.10", i.e. as work still to do.
+       */
+      current: thresholdOf(channel, current[channel]),
       recommended: Number(recommended.toFixed(2)),
       accuracyNow: Number(now.toFixed(3)),
       accuracyFitted: Number(best.accuracy.toFixed(3)),
@@ -530,14 +566,14 @@ export function renderBench (reports: EngineReport[], fixtures: Fixture[], verbo
     for (const row of report.byChannel) {
       lines.push(`| ${row.channel} | ${row.n} | ${row.pass}/${row.n} | ${row.separation === undefined ? '—（需一高一低两条夹具）' : row.separation.toFixed(2)} | ${row.p50}ms |`)
     }
-    const adjustable = report.thresholds.filter(fit => fit.trustworthy && fit.changes && fit.accuracyFitted > fit.accuracyNow + 0.02)
+    const adjustable = report.thresholds.filter(fit => fitVerdictOf(fit) === 'adjustable')
     /*
      * Two different reasons a fit is not offered, and saying the wrong one is its
      * own kind of lie: a channel can order cases perfectly and still need no
      * change (its current cut is already the held-out optimum).
      */
-    const noisyCut = report.thresholds.filter(fit => (fit.separation ?? 0) < FITTABLE_SEPARATION)
-    const alreadyOptimal = report.thresholds.filter(fit => (fit.separation ?? 0) >= FITTABLE_SEPARATION && !fit.trustworthy)
+    const noisyCut = report.thresholds.filter(fit => fitVerdictOf(fit) === 'noisy')
+    const alreadyOptimal = report.thresholds.filter(fit => fitVerdictOf(fit) === 'optimal')
     if (adjustable.length) {
       lines.push('阈值建议（**这些通道不是判错，是刀口位置不对**：分离度好而通过率低 = 排序对、概率刻度不对）', '', '| 通道 | 现值 | 拟合值 | 现在 | 样本内 | **交叉验证** | n |', '|---|---|---|---|---|---|---|')
       for (const fit of adjustable) {

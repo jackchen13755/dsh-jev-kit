@@ -190,7 +190,7 @@ test('the copied Markdown reports the same numbers the card shows', async () => 
   const report = { total: 3, window: { days: 1 }, channels: [{ channel: 'flaky', group: 'C', n: 3, flagged: 1, warn: 0, latency: { p50: 640, p95: 900 } }] }
   const markdown = toMarkdown(report, { version: '0.1.3' }, classify(report, S.zh).rows, S.zh)
   assert.match(markdown, /### Jev 决策工具箱 v0\.1\.3/)
-  assert.match(markdown, /\| flaky \| C \| 3 \| 1 \| 0 \| 640ms \| 900ms \|/)
+  assert.match(markdown, /\| 🔴 \| flaky \| C \| 3 \| 1 \| 0 \| 640ms \| 900ms \|/, 'every row carries its colour marker: the colour itself does not survive a paste')
 })
 
 test('a full ledger renders its channels, not "no records"', async () => {
@@ -259,6 +259,85 @@ test('the report envelope is unwrapped, and a bare report still works', async ()
   assert.equal(unwrapReport(report), report, 'and a route that stops wrapping must not break the card')
   assert.equal(unwrapReport(null), null)
   assert.deepEqual(unwrapReport({ ok: true }), { ok: true })
+})
+
+test('the card takes the host verdict when it is there, and recomputes when it is not', async () => {
+  /*
+   * The verdict is computed host-side (`verdictOf`) so the card, the copied Markdown
+   * and the tool cannot disagree. The local rule is a fallback for a payload that
+   * predates the field, and both paths must land on the same marker.
+   */
+  const { plugin } = await boot()
+  const { classify, S } = plugin.__internals
+  const t = S.zh
+  const hostSaid = classify({
+    total: 30,
+    channels: [
+      { channel: 'a', group: 'P', n: 5, flagged: 0, warn: 0, level: 'retire', latency: {} },
+      { channel: 'b', group: 'P', n: 30, flagged: 0, warn: 0, level: 'thin', latency: {} },
+      { channel: 'c', group: 'P', n: 30, flagged: 2, warn: 0, level: 'useful', latency: {} },
+      { channel: 'd', group: 'P', n: 30, flagged: 0, warn: 3, level: 'warn', latency: {} },
+    ],
+  }, t)
+  const byChannel = Object.fromEntries(hostSaid.rows.map((row) => [row.channel, row]))
+  assert.equal(byChannel.a.level, 'retire', 'the host verdict wins over the local sample count')
+  assert.equal(byChannel.b.level, 'unknown', "the host's `thin` maps onto this card's unmeasured tone")
+  assert.equal(byChannel.c.mark, '🔴')
+  assert.equal(byChannel.d.mark, '🟡')
+  assert.equal(byChannel.a.mark, '⬛')
+  assert.equal(byChannel.b.mark, '⚪')
+  // No `level` on the wire (an older host): the fallback must reproduce the same rule.
+  const inferred = classify({
+    total: 3,
+    channels: [
+      { channel: 'flaky', group: 'C', n: 3, flagged: 1, warn: 0, latency: {} },
+      { channel: 'scope_check', group: 'P', n: 30, flagged: 0, warn: 0, latency: {} },
+      { channel: 'retry', group: 'A', n: 30, flagged: 0, warn: 1, latency: {} },
+    ],
+  }, t)
+  const inferredBy = Object.fromEntries(inferred.rows.map((row) => [row.channel, row]))
+  assert.equal(inferredBy.flaky.level, 'bad')
+  assert.equal(inferredBy.scope_check.level, 'retire')
+  assert.equal(inferredBy.retry.level, 'warn')
+})
+
+test('the threshold table shows a fit that suggests nothing, and never paints it as an instruction', async () => {
+  /*
+   * Two ways this section lied. It gated on `suggested`, which is only the apply-ready
+   * subset — so a healthy corpus whose every fit says "no change needed" read as "run a
+   * benchmark first". And it printed the raw recommendation in the action colour, which
+   * is how a table talks someone into retuning a channel the kit itself refuses to
+   * retune (the label says 建议; the verdict says ⚪ / ⬛).
+   */
+  const { React, mount } = liveReact()
+  const bodies = {
+    '/dsh-jev-kit/api/status': { version: '0.15.1', enabled: true, channels: 23, key: { configured: true, source: 'credential:file' }, budget: {} },
+    '/dsh-jev-kit/api/report?days=7': { ok: true, days: 7, report: { total: 1, window: { days: 7 }, channels: [{ channel: 'private_scan', group: 'P', n: 1, flagged: 1, warn: 0, latency: {} }] } },
+    '/dsh-jev-kit/api/thresholds': {
+      ok: true,
+      // Nothing is apply-ready, and that is the point of the fixture.
+      applied: { scope_check: 0.1 },
+      suggested: {},
+      details: [
+        { channel: 'scope_check', current: 0.1, recommended: 0.1, accuracyNow: 0.95, accuracyFitted: 0.95, accuracyCrossVal: 0.95, n: 20, separation: 0.99, trustworthy: true, changes: false, level: 'optimal' },
+        { channel: 'retry', current: 0.6, recommended: 0.33, accuracyNow: 0.95, accuracyFitted: 1, accuracyCrossVal: 0.95, n: 20, separation: 1, trustworthy: false, changes: true, level: 'optimal' },
+        // No `level` on the wire (an older host): the fallback must still classify it.
+        { channel: 'noisy_channel', current: 0.5, recommended: 0.2, accuracyNow: 0.6, accuracyFitted: 0.6, accuracyCrossVal: 0.6, n: 20, separation: 0.4, trustworthy: false, changes: true },
+      ],
+    },
+  }
+  globalThis.fetch = async (url) => ({ ok: true, json: async () => bodies[String(url)] })
+  try {
+    const { seats } = await boot({ react: React })
+    const text = textOf(await mount(seats['jev-kit']))
+    assert.doesNotMatch(text, /还没有拟合结果/, 'a fit that needs no change is still a fit')
+    for (const channel of ['scope_check', 'retry', 'noisy_channel']) assert.match(text, new RegExp(channel))
+    assert.match(text, /⚪ 无需改动/, 'the fit legend explains what each marker means')
+    assert.match(text, /0\.33/, 'the recommendation is still shown for the record')
+    assert.match(text, /⬛/, 'a fit whose separation is below the bar is marked as not fittable')
+  } finally {
+    delete globalThis.fetch
+  }
 })
 
 test('the bundle is a ModuleLoader bundle, not an ES module', () => {

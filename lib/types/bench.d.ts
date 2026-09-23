@@ -130,6 +130,36 @@ export declare function questionHash(channelId: string): string;
 export declare const questionHashes: () => Record<string, string>;
 /** Separation below which a fitted threshold is noise rather than calibration. */
 export declare const FITTABLE_SEPARATION = 0.75;
+/**
+ * What to do about a fitted cut — the three states, decided in one place.
+ *
+ * `bench`'s own report and the settings card show the same fits, so the rule lives
+ * here rather than in each renderer: two copies of it drift, and a drifted threshold
+ * rule silently retunes a channel. The three states are different answers, and
+ * giving the wrong one is its own kind of lie:
+ *
+ *   · `noisy`      — separation too low; the "best" cut here is an artefact of which
+ *                    case happened to land where. Do not follow it.
+ *   · `adjustable` — separated, and moving the cut gains more than two points on the
+ *                    held-out folds.
+ *   · `optimal`    — separated, but moving it gains no more than two points out of
+ *                    sample: the current value is already the held-out optimum.
+ */
+export type FitVerdict = 'adjustable' | 'optimal' | 'noisy';
+/**
+ * @param fit - a fitted threshold row.
+ * @returns which of the three states it is in.
+ */
+export declare const fitVerdictOf: (fit: {
+    separation?: number;
+    trustworthy: boolean;
+    changes: boolean;
+    accuracyNow: number;
+    accuracyFitted: number;
+}) => FitVerdict;
+/** Colour marker per fit verdict — the same reason the channel table has one: colour
+ *  does not survive a copy-paste, and a recommendation has to survive the trip. */
+export declare const FIT_VERDICT_MARK: Record<FitVerdict, string>;
 /** Apply a fitted table (channel id → cut). Values outside 0..1 are ignored. */
 export declare function setThresholdOverrides(map: Record<string, number> | undefined): void;
 /** The effective cut for a channel: an applied override, else the declared default. */

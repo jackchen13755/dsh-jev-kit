@@ -53,6 +53,11 @@ done
 if [ -f client/client.js ]; then
   cp client/client.js lib/client.js
   grep -q "__ModuleLoader__" lib/client.js || { echo "build: lib/client.js is not a ModuleLoader bundle" >&2; exit 1; }
+  # Check the copy, not only the previous generation. The loop above runs before this
+  # copy, so a client source with a syntax error landed in lib/ unparsed and the build
+  # still said "complete" — the failure only surfaced later, as every browser test
+  # failing at once on `new Function(lib/client.js)`.
+  node --check lib/client.js || { echo "build: client/client.js 无法解析——拒绝产出（见上面的语法错误）" >&2; exit 1; }
   echo "=== build complete: lib/index.js + lib/client.js ==="
 else
   rm -f lib/client.js
