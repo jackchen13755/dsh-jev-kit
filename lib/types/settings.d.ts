@@ -41,6 +41,14 @@ export interface KitSettings {
      */
     disabledChannels: string[];
     /**
+     * Repository the card and `/jev-kit scan` read by default.
+     *
+     * The host process's cwd is *not* the workspace (measured: `/Users/zhe.chen`),
+     * so "scan the staged diff" without a path fails with git's confusing
+     * `--no-index` message. Naming the repo once removes the guesswork.
+     */
+    defaultRepo: string;
+    /**
      * Per-channel decision thresholds, fitted from the benchmark corpus
      * (`POST /api/bench` returns an apply-ready table). Empty means the declared
      * defaults, which is not the same as "no opinion": a cut is always in force.

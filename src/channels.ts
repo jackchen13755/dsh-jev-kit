@@ -22,6 +22,28 @@
  */
 import type { JevAnswer, JevQuestion } from './jev.js'
 
+/**
+ * Effective thresholds for the readers themselves.
+ *
+ * The override map started life in the benchmark (scoring fixtures), which meant a
+ * fitted cut changed the *report* but not what the plugin actually did. The first
+ * real pre-push run showed why that is not enough: ordinary TypeScript was flagged
+ * as "internal information" at exactly the 0.50 boundary, and the only way to act on
+ * that evidence was to edit source. Readers now consult the same map.
+ */
+let READER_THRESHOLDS: Record<string, number> = {}
+
+/** Apply fitted cuts to the readers (called with the same table as the benchmark). */
+export function setReaderThresholds (map: Record<string, number> | undefined): void {
+  READER_THRESHOLDS = { ...(map ?? {}) }
+}
+
+/** The effective cut for a channel inside a reader: override, else the literal default. */
+export function readerThreshold (channel: string, fallback: number): number {
+  const cut = READER_THRESHOLDS[channel]
+  return typeof cut === 'number' && Number.isFinite(cut) ? cut : fallback
+}
+
 /** Which part of the catalogue a channel belongs to. `P` is the priority set. */
 export type ChannelGroup = 'P' | 'A' | 'B' | 'C' | 'D'
 
@@ -134,22 +156,31 @@ export const CHANNELS: Record<string, ChannelSpec> = {
       personal: noul('Does `text` contain personal or identifying information about a real person — a home directory path, a personal email address, a phone number, a full name tied to an account, or an internal username?',
         'personal or identifying information about a real person is present',
         'no personal information; generic placeholders like /Users/dev or user@example.com do not count'),
+      /*
+       * The exclusion list is not decoration: the first real pre-push run flagged three
+       * lines of ordinary TypeScript in this project as "internal information" because
+       * they contain the project's own identifiers. A hook that cries wolf on plain
+       * code gets switched off, so the criteria now say out loud what does not count.
+       */
       internal: noul('Does `text` reveal an organisation-internal detail that should not be public — an intranet hostname, an internal repository or service name, or an internal project codename?',
-        'an internal hostname, service, or codename is exposed',
-        'nothing that identifies an internal system'),
+        'an intranet hostname, an internal-only service or repository, or an internal codename is exposed',
+        'nothing that identifies an internal system; the project\'s own public package names and identifiers, a public vendor\'s documented API endpoint, localhost addresses and open-source project names do not count'),
     }),
     read: (answers, state) => {
       const secret = p(answers, 'secret')
       const personal = p(answers, 'personal')
       const internal = p(answers, 'internal')
+      // Evidence-driven: the first real pre-push run flagged plain TypeScript at
+      // internal=0.50, so this cut has to be raisable from settings, not baked in.
+      const cut = readerThreshold('private_scan', 0.5)
       const findings: string[] = []
-      if ((secret ?? 0) >= 0.5) findings.push('凭据/密钥')
-      if ((personal ?? 0) >= 0.5) findings.push('个人信息')
-      if ((internal ?? 0) >= 0.5) findings.push('内网信息')
+      if ((secret ?? 0) >= cut) findings.push('凭据/密钥')
+      if ((personal ?? 0) >= cut) findings.push('个人信息')
+      if ((internal ?? 0) >= cut) findings.push('内网信息')
       return {
         level: findings.length ? 'flag' : 'info',
         headline: findings.length ? `⚠️ 疑似 ${findings.join(' + ')}` : '未发现泄漏',
-        details: [`secret=${show(secret)} personal=${show(personal)} internal=${show(internal)}`, `片段：${(state.text ?? '').slice(0, 100)}`],
+        details: [`secret=${show(secret, cut)} personal=${show(personal, cut)} internal=${show(internal, cut)}`, `片段：${(state.text ?? '').slice(0, 100)}`],
         values: { secret, personal, internal },
       }
     },

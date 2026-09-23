@@ -28,7 +28,7 @@ import { createJev, compileExtraPatterns, redact, JevError, type Jev, type JevQu
 import { createBreaker, createLimiter, percentiles } from './resilience.js'
 import { createCache, keyOf } from './cache.js'
 import { serviceOf, type CredentialsService, type Logger, type WebRequestLike, type WebResponseLike, type WebServerLike } from './host.js'
-import { CHANNEL_LIST, channelOf, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
+import { CHANNEL_LIST, channelOf, setReaderThresholds, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
 import { hunksOf, unitsOf, type Unit } from './segments.js'
 import { jevEngine, layaEngine, selectEngines, trimState, type Engine } from './engines.js'
 import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, fittedTable, setThresholdOverrides, thresholdOverrides, questionHash, questionHashes, wordingDrift, type BenchRecord, type Fixture, type ThresholdFit, type Trial } from './bench.js'
@@ -414,6 +414,7 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
       },
       channels: CHANNEL_LIST.length,
       disabledChannels: config.disabledChannels,
+      defaultRepo: config.defaultRepo,
       engines: config.engines,
       layaEndpoint: config.layaEndpoint,
       thresholds: thresholdOverrides(),
@@ -450,7 +451,19 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
  */
 async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Promise<{ diff: string, error?: string }> {
   const { execFile } = await import('node:child_process')
-  const args = ['-C', repo, 'diff', '--no-color', '-U0', ...(staged ? ['--cached'] : [])]
+  const run = (args: string[]): Promise<{ out: string, error?: string }> => new Promise((resolve) => {
+    execFile('git', args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) { resolve({ out: '', error: `${error.message.split('\n')[0]}${stderr ? ` · ${String(stderr).trim().slice(0, 160)}` : ''}` }); return }
+      resolve({ out: stdout })
+    })
+  })
+  // Ask git whether this is a repository *first*. Without this, a non-repository
+  // path makes git fall back to --no-index and answer "unknown option `cached`",
+  // which names the wrong problem.
+  const probe = await run(['-C', repo, 'rev-parse', '--show-toplevel'])
+  if (probe.error) return { diff: '', error: `${repo} 不是 git 仓库（或 git 不可用）：${probe.error}` }
+  const root = probe.out.trim()
+  const args = ['-C', root, 'diff', '--no-color', '-U0', ...(staged ? ['--cached'] : [])]
   return await new Promise((resolve) => {
     execFile('git', args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) { resolve({ diff: '', error: `${error.message.split('\n')[0]}${stderr ? ` · ${String(stderr).trim().slice(0, 160)}` : ''}` }); return }
@@ -856,6 +869,7 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                 breaker = createBreaker({ failures: config.breakerFailures, cooldownMs: config.breakerCooldownMs })
                 cache = createCache<{ verdict: Verdict, ms: number }>(config.cacheMaxEntries, config.cacheTtlMs)
                 setThresholdOverrides(config.thresholds)
+                setReaderThresholds(config.thresholds)
                 send(res, 200, { ok: true, settings: { enabled: config.enabled, maxItems: config.maxItems, requestTimeoutMs: config.requestTimeoutMs, callBudgetMs: config.callBudgetMs, concurrency: config.concurrency, cacheTtlMs: config.cacheTtlMs, thresholds: thresholdOverrides() } })
                 return
               }
@@ -866,7 +880,7 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                  * this exists so the button and the command share one behaviour.
                  */
                 const body = await readBody(req) as { repo?: string }
-                const repo = typeof body?.repo === 'string' && body.repo ? body.repo : process.cwd()
+                const repo = typeof body?.repo === 'string' && body.repo ? body.repo : (config.defaultRepo || process.cwd())
                 const { diff, error } = await gitDiff(repo, true)
                 if (error) { send(res, 200, { ok: false, error: `读不到 ${repo} 的暂存改动：${error}` }); return }
                 if (!diff.trim()) { send(res, 200, { ok: true, units: 0, flagged: 0, findings: [], markdown: `${repo} 的暂存区是空的。` }); return }
@@ -996,7 +1010,7 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
         handler: async (invocation: { rawInput: string, cwd?: string }) => {
           const raw = invocation.rawInput.trim()
           const [sub = '', ...rest] = raw.split(/\s+/)
-          const repo = invocation.cwd ?? process.cwd()
+          const repo = config.defaultRepo || invocation.cwd || process.cwd()
           /*
            * `scan` and `scope` exist because a tool only fires when a model remembers
            * to call it — measured: the privacy channel ran twice in an entire session,
@@ -1067,6 +1081,8 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
    * later, so a restart silently reverted to the hand-picked cuts.
    */
   setThresholdOverrides(config.thresholds)
+  // The readers get the same table: a fit that only changes the report is not a fix.
+  setReaderThresholds(config.thresholds)
   if (Object.keys(config.thresholds).length) {
     logger?.info?.(`[dsh-jev-kit] 已应用 ${Object.keys(config.thresholds).length} 条拟合阈值：${JSON.stringify(config.thresholds)}`)
   }

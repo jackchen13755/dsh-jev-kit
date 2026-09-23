@@ -21,6 +21,10 @@
  * @module dsh-jev-kit/channels
  */
 import type { JevAnswer, JevQuestion } from './jev.js';
+/** Apply fitted cuts to the readers (called with the same table as the benchmark). */
+export declare function setReaderThresholds(map: Record<string, number> | undefined): void;
+/** The effective cut for a channel inside a reader: override, else the literal default. */
+export declare function readerThreshold(channel: string, fallback: number): number;
 /** Which part of the catalogue a channel belongs to. `P` is the priority set. */
 export type ChannelGroup = 'P' | 'A' | 'B' | 'C' | 'D';
 /** How one judgment is read. */

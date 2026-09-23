@@ -55,6 +55,14 @@ export interface KitSettings {
    */
   disabledChannels: string[]
   /**
+   * Repository the card and `/jev-kit scan` read by default.
+   *
+   * The host process's cwd is *not* the workspace (measured: `/Users/zhe.chen`),
+   * so "scan the staged diff" without a path fails with git's confusing
+   * `--no-index` message. Naming the repo once removes the guesswork.
+   */
+  defaultRepo: string
+  /**
    * Per-channel decision thresholds, fitted from the benchmark corpus
    * (`POST /api/bench` returns an apply-ready table). Empty means the declared
    * defaults, which is not the same as "no opinion": a cut is always in force.
@@ -80,6 +88,7 @@ export const KIT_DEFAULTS: KitSettings = {
   localMaxItems: 12,
   thresholds: {},
   disabledChannels: [],
+  defaultRepo: '',
 }
 
 const BOUNDS: Record<string, [number, number]> = {
@@ -122,6 +131,7 @@ export function merge (base: KitSettings, patch: unknown): KitSettings {
   if (typeof input.apiKeyRef === 'string' && input.apiKeyRef.trim()) out.apiKeyRef = input.apiKeyRef.trim()
   if (Array.isArray(input.redactExtra)) out.redactExtra = input.redactExtra.filter((x): x is string => typeof x === 'string')
   if (Array.isArray(input.disabledChannels)) out.disabledChannels = input.disabledChannels.filter((x): x is string => typeof x === 'string')
+  if (typeof input.defaultRepo === 'string') out.defaultRepo = input.defaultRepo.trim()
   if (input.thresholds && typeof input.thresholds === 'object') {
     out.thresholds = Object.fromEntries(Object.entries(input.thresholds).filter(([, cut]) => typeof cut === 'number' && Number.isFinite(cut) && cut >= 0 && cut <= 1))
   }

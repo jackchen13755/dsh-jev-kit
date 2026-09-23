@@ -57,12 +57,41 @@ if [ -z "$range" ]; then
   exit 0
 fi
 
+# Per-repository exemptions. A repository whose content is credential-shaped by
+# design (a privacy-scanner fixture corpus, a security test suite) would otherwise be
+# unable to push at all — measured: this hook blocked its own repository's push on the
+# first real use. `.jev-kit-skip` holds git pathspecs, one per line, `#` comments.
+# Bash 3.2 (macOS) treats an empty array as unbound under `set -u`, so the count is
+# tracked explicitly and the array is only expanded when it is non-empty.
+skip_count=0
+skip_args=""
+skip_file="$(git rev-parse --show-toplevel 2>/dev/null)/.jev-kit-skip"
+if [ -f "$skip_file" ]; then
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    : "$((skip_count += 1))"
+  done < "$skip_file"
+  # Re-read into positional parameters rather than an array (same reason).
+  set -- 
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    set -- "$@" ":(exclude)$line"
+  done < "$skip_file"
+  skip_args="$*"
+  [ "$skip_count" -gt 0 ] && echo "jev-kit pre-push: 按 .jev-kit-skip 排除 $skip_count 条路径" >&2
+fi
+
 # Send the RAW diff, headers included. Filtering it down to added lines first looked
 # tidier and broke the scan: the route recognises a diff by its `diff --git` / `@@`
 # headers, so a stripped diff fell back to prose splitting — which truncates each
 # block at 1500 characters and drops file provenance. The result was a hook that
 # reported "0 findings" on a commit that plainly contains a credential.
-diff=$(git diff --no-color -U0 "$range" 2>/dev/null || true)
+if [ "$skip_count" -gt 0 ]; then
+  # shellcheck disable=SC2086
+  diff=$(git diff --no-color -U0 "$range" -- . $(printf '%s\n' "$skip_args") 2>/dev/null || git diff --no-color -U0 "$range" 2>/dev/null || true)
+else
+  diff=$(git diff --no-color -U0 "$range" 2>/dev/null || true)
+fi
 if [ -z "$diff" ]; then
   exit 0   # nothing changed: nothing to leak
 fi
