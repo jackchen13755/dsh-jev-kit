@@ -881,12 +881,6 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
 
   /* ── stored settings, then the API ──────────────────────────────────── */
 
-  /*
-   * Apply the fitted threshold table before anything is judged: a fit that is not
-   * applied is just a table in a report.
-   */
-  setThresholdOverrides(config.thresholds)
-
   const stored = loadStored(ledgerDir)
   if (stored) {
     const candidate = merge(KIT_DEFAULTS, stored)
@@ -904,6 +898,16 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
   try {
     ctx.inject?.(['clientModules'], (scope: KitContext) => { healClientMeta(scope) })
   } catch { /* no client-modules service in this profile */ }
+
+  /*
+   * Apply the fitted threshold table **after** the stored settings are merged.
+   * Applying it before was a real bug: the persisted table was read one line
+   * later, so a restart silently reverted to the hand-picked cuts.
+   */
+  setThresholdOverrides(config.thresholds)
+  if (Object.keys(config.thresholds).length) {
+    logger?.info?.(`[dsh-jev-kit] 已应用 ${Object.keys(config.thresholds).length} 条拟合阈值：${JSON.stringify(config.thresholds)}`)
+  }
 
   installApi(ctx)
 }
