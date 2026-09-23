@@ -24,10 +24,14 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { createJev, compileExtraPatterns, redact, JevError, type Jev, type JevQuestion } from './jev.js'
-import { createBreaker, createLimiter, percentiles } from './resilience.js'
-import { createCache, keyOf } from './cache.js'
-import { serviceOf, type CredentialsService, type Logger, type WebRequestLike, type WebResponseLike, type WebServerLike } from './host.js'
+import {
+  createJev, compileExtraPatterns, redact, JevError,
+  createBreaker, createLimiter, percentiles,
+  createCache, keyOf,
+  serviceOf,
+  type CredentialsService, type Jev, type JevQuestion, type Logger,
+  type WebRequestLike, type WebResponseLike, type WebServerLike,
+} from '@dsh-external/dsh-jev-core'
 import { CHANNEL_LIST, channelOf, setReaderThresholds, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
 import { hunksOf, unitsOf, type Unit } from './segments.js'
 import { jevEngine, layaEngine, selectEngines, trimState, type Engine } from './engines.js'

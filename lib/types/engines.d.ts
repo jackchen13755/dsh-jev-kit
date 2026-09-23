@@ -18,7 +18,7 @@
  *
  * @module dsh-jev-kit/engines
  */
-import { type Jev, type JevQuestion, type JevAnswer } from './jev.js';
+import { type Jev, type JevQuestion, type JevAnswer } from '@dsh-external/dsh-jev-core';
 export interface AskResult {
     answers: Record<string, JevAnswer>;
     ms: number;

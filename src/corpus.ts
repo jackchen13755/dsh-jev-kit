@@ -17,7 +17,7 @@
  *
  * @module dsh-jev-kit/corpus
  */
-import type { JevQuestion } from './jev.js'
+import type { JevQuestion } from '@dsh-external/dsh-jev-core'
 import type { Fixture } from './bench.js'
 
 /* ── priority 1: privacy scan (composed → truth is what was injected) ─── */

@@ -20,7 +20,7 @@
  *
  * @module dsh-jev-kit/channels
  */
-import type { JevAnswer, JevQuestion } from './jev.js'
+import type { JevAnswer, JevQuestion } from '@dsh-external/dsh-jev-core'
 
 /**
  * Effective thresholds for the readers themselves.

@@ -20,7 +20,7 @@
  *
  * @module dsh-jev-kit/channels
  */
-import type { JevAnswer, JevQuestion } from './jev.js';
+import type { JevAnswer, JevQuestion } from '@dsh-external/dsh-jev-core';
 /** Apply fitted cuts to the readers (called with the same table as the benchmark). */
 export declare function setReaderThresholds(map: Record<string, number> | undefined): void;
 /** The effective cut for a channel inside a reader: override, else the literal default. */

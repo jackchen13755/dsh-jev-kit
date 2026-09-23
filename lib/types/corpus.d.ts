@@ -17,7 +17,7 @@
  *
  * @module dsh-jev-kit/corpus
  */
-import type { JevQuestion } from './jev.js';
+import type { JevQuestion } from '@dsh-external/dsh-jev-core';
 import type { Fixture } from './bench.js';
 export declare const LENS_DESTRUCTIVE: JevQuestion;
 export declare const LENS_RESTORABLE: JevQuestion;

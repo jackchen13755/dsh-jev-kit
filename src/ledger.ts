@@ -10,7 +10,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { percentiles } from './resilience.js'
+import { percentiles } from '@dsh-external/dsh-jev-core'
 import { CHANNEL_LIST } from './channels.js'
 
 /** The full catalogue, so the report can name what was never used. */

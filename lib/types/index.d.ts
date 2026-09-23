@@ -1,6 +1,5 @@
 /// <reference types="node" resolution-mode="require"/>
-import { type JevQuestion } from './jev.js';
-import { type Logger, type WebServerLike } from './host.js';
+import { type JevQuestion, type Logger, type WebServerLike } from '@dsh-external/dsh-jev-core';
 import { type KitSettings } from './settings.js';
 export declare const name = "@dsh-external/dsh-jev-kit";
 export declare const inject: string[];

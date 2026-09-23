@@ -1,5 +1,5 @@
 import { type ChannelState, type Verdict } from './channels.js';
-import type { JevAnswer, JevQuestion } from './jev.js';
+import type { JevAnswer, JevQuestion } from '@dsh-external/dsh-jev-core';
 export type Expectation = 
 /** The primary field should come out above the channel's threshold. */
 {

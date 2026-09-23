@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { FIXTURES, COMMAND_FIXTURES, separation, check, questionsFor, verdictFor, summarizeEngine, renderBench, fitThresholds, setThresholdOverrides, thresholdOf, fittedTable } from '../lib/bench.js'
 import { CHANNEL_LIST, channelOf } from '../lib/channels.js'
 import { selectEngines } from '../lib/engines.js'
-import { percentiles } from '../lib/resilience.js'
+import { percentiles } from '@dsh-external/dsh-jev-core'
 
 test('every fixture states its ground truth and names a real channel', () => {
   const ids = FIXTURES.map(fixture => fixture.id)
