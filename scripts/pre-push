@@ -57,9 +57,28 @@ if [ -z "$range" ]; then
   exit 0
 fi
 
-diff=$(git diff --no-color -U0 "$range" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+' || true)
+# Send the RAW diff, headers included. Filtering it down to added lines first looked
+# tidier and broke the scan: the route recognises a diff by its `diff --git` / `@@`
+# headers, so a stripped diff fell back to prose splitting — which truncates each
+# block at 1500 characters and drops file provenance. The result was a hook that
+# reported "0 findings" on a commit that plainly contains a credential.
+diff=$(git diff --no-color -U0 "$range" 2>/dev/null || true)
 if [ -z "$diff" ]; then
-  exit 0   # nothing added: nothing to leak
+  exit 0   # nothing changed: nothing to leak
+fi
+# Added lines only, for the cheap "is there anything to scan" decision.
+added=$(printf '%s' "$diff" | grep -cE '^\+' || true)
+if [ "${added:-0}" -le 1 ]; then
+  exit 0
+fi
+
+# Bound what goes over the wire (the route allows 2 MB; scanning is capped by items
+# anyway). Truncation is announced: a scan that silently looked at half the diff
+# would report "clean" about text it never read.
+max_bytes="${JEV_MAX_DIFF_BYTES:-1000000}"
+if [ "$(printf '%s' "$diff" | wc -c | tr -d ' ')" -gt "$max_bytes" ]; then
+  echo "jev-kit pre-push: ⚠️ diff 超过 ${max_bytes} 字节，只扫描前 ${max_bytes} 字节（其余未扫描）" >&2
+  diff=$(printf '%s' "$diff" | head -c "$max_bytes")
 fi
 
 # JSON-encode without depending on jq (python3 ships with the harness).
@@ -75,10 +94,30 @@ if [ -z "$response" ]; then
   exit 0
 fi
 
-flagged=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("flagged", 0))' 2>/dev/null || echo 0)
-if [ "$flagged" = "0" ]; then
-  exit 0
-fi
+# A failed request is NOT a clean diff. Reading a 400 as "flagged 0" is exactly the
+# silent-pass this hook exists to prevent, so an unusable answer warns loudly and
+# lets the push through on purpose (visible fail-open, never invisible).
+verdict=$(printf '%s' "$response" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("unparsable 0"); raise SystemExit
+if data.get("ok") is not True:
+    print("error %s" % (data.get("error") or "unknown"))
+else:
+    print("ok %s" % data.get("flagged", 0))
+' 2>/dev/null || echo "unparsable 0")
+
+case "$verdict" in
+  ok\ 0) exit 0 ;;
+  ok\ *) flagged="${verdict#ok }" ;;
+  *)
+    echo "jev-kit pre-push: ⚠️ 扫描未能完成（$verdict）——本次不阻塞推送，但**这不代表 diff 干净**。" >&2
+    exit 0
+    ;;
+esac
+if [ "$flagged" = "0" ]; then exit 0; fi
 
 echo "" >&2
 printf '%s' "$response" | python3 -c '

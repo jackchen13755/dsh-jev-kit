@@ -752,7 +752,14 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
           // through `unknown`: the host hands us a real IncomingMessage here.
           for await (const chunk of req as unknown as AsyncIterable<Buffer>) {
             size += chunk.length
-            if (size > 64 * 1024) throw new Error('body too large')
+            /*
+             * 2 MB, not 64 KB: a single ordinary commit's diff is easily 100–400 KB
+             * (this repository's own corpus commit is 194 KB), and a cap below that
+             * turns every real push into "body too large" — which the hook then read
+             * as "no findings". The item cap is what bounds the *cost*; this only
+             * bounds the memory.
+             */
+            if (size > 2 * 1024 * 1024) throw new Error(`body too large (${size} bytes, limit 2 MB)`)
             chunks.push(chunk)
           }
           const raw = Buffer.concat(chunks).toString('utf8').trim()
