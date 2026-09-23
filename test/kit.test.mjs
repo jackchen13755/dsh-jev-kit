@@ -278,6 +278,31 @@ test('the ledger groups by channel and never counts a failure as neutral', () =>
   assert.match(render(report), /淘汰通道/)
 })
 
+test('applying a fitted table never deletes a cut the fit did not measure', () => {
+  /*
+   * Measured on this machine: `private_scan.internal` had been cut by hand at 0.75
+   * (the channel's own comment records that a single all-axes cut cried wolf on plain
+   * code). Applying a bench suggestion — which only ever mentions `private_scan` — used
+   * to write the patch as the whole map, so the per-axis cut vanished, the internal axis
+   * fell back to 0.06, and the pre-push gate began flagging ordinary comments and
+   * markdown table headers. A patch says what it changes; it must not say what survives.
+   */
+  const base = merge(KIT_DEFAULTS, { thresholds: { 'private_scan.internal': 0.75, risk: 0.42 } })
+  assert.deepEqual(base.thresholds, { 'private_scan.internal': 0.75, risk: 0.42 })
+  const afterApply = merge(base, { thresholds: { scope_check: 0.1, private_scan: 0.06 } })
+  assert.equal(afterApply.thresholds['private_scan.internal'], 0.75, 'the per-axis cut survives an unrelated apply')
+  assert.equal(afterApply.thresholds.risk, 0.42)
+  assert.equal(afterApply.thresholds.private_scan, 0.06, 'and the patch still lands')
+  // A fitted value still overwrites the key it is about.
+  assert.equal(merge(base, { thresholds: { risk: 0.5 } }).thresholds.risk, 0.5)
+  // Removal stays expressible, and unusable values are still ignored rather than stored.
+  assert.equal(merge(base, { thresholds: { risk: null } }).thresholds.risk, undefined)
+  assert.equal(merge(base, { thresholds: { risk: 7 } }).thresholds.risk, 0.42)
+  assert.equal(merge(base, { thresholds: { risk: 'x' } }).thresholds.risk, 0.42)
+  // The other fields are untouched by any of this.
+  assert.equal(afterApply.enabled, KIT_DEFAULTS.enabled)
+})
+
 test('settings reject out-of-range values and ignore unusable patches', () => {
   assert.equal(validate(KIT_DEFAULTS), undefined)
   assert.match(String(validate({ ...KIT_DEFAULTS, maxItems: 10_000 })), /maxItems 必须在 1–500/)

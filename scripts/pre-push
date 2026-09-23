@@ -125,7 +125,19 @@ payload=$(DIFF="$diff" python3 -c 'import json,os; print(json.dumps({"diff": os.
 # scored **0.88** — that is *meaning*, and it is what the model is for. Running only
 # the model missed the first; running only rules misses the second.
 token_hits=$(printf '%s' "$diff" | grep -nEi 'ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|sk_live_[A-Za-z0-9]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|MIIE[A-Za-z0-9+/]{20,}|BEGIN [A-Z ]*PRIVATE KEY' | head -3 || true)
-path_hits=$(printf '%s' "$diff" | grep -nE '^\+.*/Users/[a-z][a-z0-9._-]+|^\+.*[A-Za-z0-9._-]+\.(internal|corp|intra)\b' | head -3 || true)
+# The dotted-name rule targets hostnames, and a hostname never contains an underscore
+# (it is not a legal character there — which is exactly why `private_scan.internal` is a
+# settings key and not a machine). Without that exclusion this layer flags the kit's own
+# per-axis threshold key, and `.jev-kit-skip` can only ever be a per-file patch for it:
+# every new source file that mentions the key would need an exemption. What the exclusion
+# drops is counted and reported on every push, so it stays auditable rather than silent.
+path_re='^\+.*/Users/[a-z][a-z0-9._-]+|^\+.*[A-Za-z0-9._-]+\.(internal|corp|intra)\b'
+path_raw=$(printf '%s' "$diff" | grep -nE "$path_re" || true)
+path_hits=$(printf '%s' "$path_raw" | grep -vE '[A-Za-z0-9.-]*_[A-Za-z0-9._-]*\.(internal|corp|intra)\b' | head -3 || true)
+path_skipped=$(printf '%s' "$path_raw" | grep -cE '[A-Za-z0-9.-]*_[A-Za-z0-9._-]*\.(internal|corp|intra)\b' || true)
+if [ "${path_skipped:-0}" != "0" ]; then
+  echo "jev-kit pre-push: 按「主机名不含下划线」跳过 $path_skipped 处标识符形状（settings key 一类，不是主机名）" >&2
+fi
 if [ -n "$token_hits$path_hits" ]; then
   echo "" >&2
   echo "jev-kit pre-push: 正则层发现疑似凭据/内网形态（这一层不看语义，只看形状）：" >&2
