@@ -113,7 +113,14 @@ export interface ThresholdFit {
     current: number;
     recommended: number;
     accuracyNow: number;
+    /** In-sample accuracy at the fitted cut — optimistic by construction. */
     accuracyFitted: number;
+    /**
+     * k-fold estimate: the cut is fitted on k-1 folds and scored on the held-out
+     * one. This is the number to believe; the in-sample figure is kept only to show
+     * how much of the gain was the fit memorising its own data.
+     */
+    accuracyCrossVal: number;
     n: number;
     /** True when the fitted cut actually changes a decision on this corpus. */
     changes: boolean;
@@ -128,6 +135,14 @@ export interface ThresholdFit {
 }
 /** Separation below which a fitted threshold is noise rather than calibration. */
 export declare const FITTABLE_SEPARATION = 0.75;
+/** Apply a fitted table (channel id → cut). Values outside 0..1 are ignored. */
+export declare function setThresholdOverrides(map: Record<string, number> | undefined): void;
+/** The effective cut for a channel: an applied override, else the declared default. */
+export declare function thresholdOf(channel: string, fallback?: number): number;
+/** The currently applied overrides, for status reporting. */
+export declare const thresholdOverrides: () => Record<string, number>;
+/** Apply-ready JSON: every trustworthy fit, ready to paste into settings. */
+export declare function fittedTable(fits: ThresholdFit[]): Record<string, number>;
 /** Fit one cut per numeric channel from labelled values. */
 export declare function fitThresholds(fixtures: Fixture[], trials: Trial[], current?: Record<string, number>): ThresholdFit[];
 export interface EngineReport {

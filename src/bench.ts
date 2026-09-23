@@ -219,7 +219,7 @@ export function separation (high: number[], low: number[]): number | undefined {
 
 /** Does this verdict satisfy the fixture's expectation? */
 export function check (fixture: Fixture, verdict: Verdict): { ok: boolean, value?: number | string, why?: string } {
-  const at = DEFAULT_THRESHOLDS[fixture.channel] ?? 0.5
+  const at = thresholdOf(fixture.channel)
   if (fixture.expect.kind === 'choice') {
     const value = verdict.values[fixture.expect.field]
     const ok = String(value) === fixture.expect.equals
@@ -247,7 +247,14 @@ export interface ThresholdFit {
   current: number
   recommended: number
   accuracyNow: number
+  /** In-sample accuracy at the fitted cut — optimistic by construction. */
   accuracyFitted: number
+  /**
+   * k-fold estimate: the cut is fitted on k-1 folds and scored on the held-out
+   * one. This is the number to believe; the in-sample figure is kept only to show
+   * how much of the gain was the fit memorising its own data.
+   */
+  accuracyCrossVal: number
   n: number
   /** True when the fitted cut actually changes a decision on this corpus. */
   changes: boolean
@@ -264,6 +271,36 @@ export interface ThresholdFit {
 /** Separation below which a fitted threshold is noise rather than calibration. */
 export const FITTABLE_SEPARATION = 0.75
 
+/*
+ * Effective thresholds: the hand-picked defaults, plus whatever the corpus fitted.
+ * Kept module-level and overridable so a fitted table can be *applied* without
+ * editing the channels — the readers keep their own idea of a verdict level, while
+ * the score that judges them uses the cut the data supports.
+ */
+let THRESHOLD_OVERRIDES: Record<string, number> = {}
+
+/** Apply a fitted table (channel id → cut). Values outside 0..1 are ignored. */
+export function setThresholdOverrides (map: Record<string, number> | undefined): void {
+  const clean: Record<string, number> = {}
+  for (const [channel, cut] of Object.entries(map ?? {})) {
+    if (typeof cut === 'number' && Number.isFinite(cut) && cut >= 0 && cut <= 1) clean[channel] = cut
+  }
+  THRESHOLD_OVERRIDES = clean
+}
+
+/** The effective cut for a channel: an applied override, else the declared default. */
+export function thresholdOf (channel: string, fallback?: number): number {
+  return THRESHOLD_OVERRIDES[channel] ?? fallback ?? DEFAULT_THRESHOLDS[channel] ?? 0.5
+}
+
+/** The currently applied overrides, for status reporting. */
+export const thresholdOverrides = (): Record<string, number> => ({ ...THRESHOLD_OVERRIDES })
+
+/** Apply-ready JSON: every trustworthy fit, ready to paste into settings. */
+export function fittedTable (fits: ThresholdFit[]): Record<string, number> {
+  return Object.fromEntries(fits.filter(fit => fit.trustworthy && fit.changes).map(fit => [fit.channel, fit.recommended]))
+}
+
 /** Fit one cut per numeric channel from labelled values. */
 export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Record<string, number> = DEFAULT_THRESHOLDS): ThresholdFit[] {
   const out: ThresholdFit[] = []
@@ -279,12 +316,33 @@ export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Re
     const accuracyAt = (cut: number): number => pairs.filter(pair => (pair.value >= cut) === pair.high).length / pairs.length
     const values = [...new Set(pairs.map(pair => pair.value))].sort((a, b) => a - b)
     const cuts = [0, ...values.flatMap((value, index) => index === 0 ? [value] : [(values[index - 1] as number + value) / 2]), 1]
-    let best = { cut: current[channel] ?? 0.5, accuracy: accuracyAt(current[channel] ?? 0.5) }
+    const base = thresholdOf(channel, current[channel])
+    let best = { cut: base, accuracy: accuracyAt(base) }
     for (const cut of cuts) {
       const accuracy = accuracyAt(cut)
       if (accuracy > best.accuracy + 1e-9) best = { cut, accuracy }
     }
-    const now = accuracyAt(current[channel] ?? 0.5)
+    const now = accuracyAt(base)
+    // Deterministic k-fold by index: no shuffling, so two runs of the same corpus
+    // produce the same estimate.
+    const folds = Math.max(2, Math.min(5, Math.floor(pairs.length / 4)))
+    let heldOut = 0
+    for (let fold = 0; fold < folds; fold++) {
+      const test = pairs.filter((_, index) => index % folds === fold)
+      const train = pairs.filter((_, index) => index % folds !== fold)
+      if (!test.length || !train.length) continue
+      if (!train.some(pair => pair.high) || !train.some(pair => !pair.high)) { heldOut += test.length; continue }
+      const trainAccuracy = (cut: number): number => train.filter(pair => (pair.value >= cut) === pair.high).length / train.length
+      const trainValues = [...new Set(train.map(pair => pair.value))].sort((a, b) => a - b)
+      const trainCuts = [0, ...trainValues.flatMap((value, index) => index === 0 ? [value] : [((trainValues[index - 1] as number) + value) / 2]), 1]
+      let pick = current[channel] ?? 0.5
+      let bestTrain = trainAccuracy(pick)
+      for (const cut of trainCuts) {
+        const accuracy = trainAccuracy(cut)
+        if (accuracy > bestTrain + 1e-9) { bestTrain = accuracy; pick = cut }
+      }
+      heldOut += test.filter(pair => (pair.value >= pick) === pair.high).length
+    }
     const sep = separation(pairs.filter(pair => pair.high).map(pair => pair.value), pairs.filter(pair => !pair.high).map(pair => pair.value))
     out.push({
       channel,
@@ -292,10 +350,13 @@ export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Re
       recommended: Number(best.cut.toFixed(2)),
       accuracyNow: Number(now.toFixed(3)),
       accuracyFitted: Number(best.accuracy.toFixed(3)),
+      accuracyCrossVal: Number((heldOut / pairs.length).toFixed(3)),
       n: pairs.length,
       changes: Math.abs(best.cut - (current[channel] ?? 0.5)) > 0.01,
       separation: sep,
-      trustworthy: (sep ?? 0) >= FITTABLE_SEPARATION,
+      // Trustworthy means: it orders well AND the gain survives being scored on
+      // data the fit never saw.
+      trustworthy: (sep ?? 0) >= FITTABLE_SEPARATION && heldOut / pairs.length > now + 0.02,
     })
   }
   return out.sort((a, b) => (b.accuracyFitted - b.accuracyNow) - (a.accuracyFitted - a.accuracyNow))
@@ -373,16 +434,26 @@ export function renderBench (reports: EngineReport[], fixtures: Fixture[], verbo
       lines.push(`| ${row.channel} | ${row.n} | ${row.pass}/${row.n} | ${row.separation === undefined ? '—（需一高一低两条夹具）' : row.separation.toFixed(2)} | ${row.p50}ms |`)
     }
     const adjustable = report.thresholds.filter(fit => fit.trustworthy && fit.changes && fit.accuracyFitted > fit.accuracyNow + 0.02)
-    const unfittable = report.thresholds.filter(fit => !fit.trustworthy)
+    /*
+     * Two different reasons a fit is not offered, and saying the wrong one is its
+     * own kind of lie: a channel can order cases perfectly and still need no
+     * change (its current cut is already the held-out optimum).
+     */
+    const noisyCut = report.thresholds.filter(fit => (fit.separation ?? 0) < FITTABLE_SEPARATION)
+    const alreadyOptimal = report.thresholds.filter(fit => (fit.separation ?? 0) >= FITTABLE_SEPARATION && !fit.trustworthy)
     if (adjustable.length) {
-      lines.push('阈值建议（**这些通道不是判错，是刀口位置不对**：分离度好而通过率低 = 排序对、概率刻度不对）', '', '| 通道 | 现值 | 语料拟合值 | 通过率 | 拟合后 | n |', '|---|---|---|---|---|---|')
+      lines.push('阈值建议（**这些通道不是判错，是刀口位置不对**：分离度好而通过率低 = 排序对、概率刻度不对）', '', '| 通道 | 现值 | 拟合值 | 现在 | 样本内 | **交叉验证** | n |', '|---|---|---|---|---|---|---|')
       for (const fit of adjustable) {
-        lines.push(`| ${fit.channel} | ${fit.current.toFixed(2)} | **${fit.recommended.toFixed(2)}** | ${(fit.accuracyNow * 100).toFixed(0)}% | **${(fit.accuracyFitted * 100).toFixed(0)}%** | ${fit.n} |`)
+        lines.push(`| ${fit.channel} | ${fit.current.toFixed(2)} | **${fit.recommended.toFixed(2)}** | ${(fit.accuracyNow * 100).toFixed(0)}% | ${(fit.accuracyFitted * 100).toFixed(0)}% | **${(fit.accuracyCrossVal * 100).toFixed(0)}%** | ${fit.n} |`)
       }
+      lines.push('', '读法：**只信交叉验证那一列**（在拟合没见过的折上评分）。样本内那列是"拟合记住了自己数据"的上限。', '')
       lines.push('')
     }
-    if (unfittable.length) {
-      lines.push(`不可拟合（分离度 < ${FITTABLE_SEPARATION}：在这种通道上"最佳刀口"是过拟合，**别照着改**）`, '', unfittable.map(fit => `\`${fit.channel}\` 分离度 ${(fit.separation ?? 0).toFixed(2)}（现值 ${fit.current.toFixed(2)}）`).join(' · '), '')
+    if (noisyCut.length) {
+      lines.push(`不可拟合（分离度 < ${FITTABLE_SEPARATION}：在这种通道上"最佳刀口"是过拟合，**别照着改**）`, '', noisyCut.map(fit => `\`${fit.channel}\` 分离度 ${(fit.separation ?? 0).toFixed(2)}（现值 ${fit.current.toFixed(2)}）`).join(' · '), '')
+    }
+    if (alreadyOptimal.length) {
+      lines.push(`无需改动（分离度足够，但换刀口在留出折上收益 < 2 个点——**当前值已接近最优**）`, '', alreadyOptimal.map(fit => `\`${fit.channel}\` 现值 ${fit.current.toFixed(2)}（分离度 ${(fit.separation ?? 0).toFixed(2)}）`).join(' · '), '')
     }
   }
 

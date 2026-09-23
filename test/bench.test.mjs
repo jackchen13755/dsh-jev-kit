@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { FIXTURES, COMMAND_FIXTURES, separation, check, questionsFor, verdictFor, summarizeEngine, renderBench, fitThresholds } from '../lib/bench.js'
+import { FIXTURES, COMMAND_FIXTURES, separation, check, questionsFor, verdictFor, summarizeEngine, renderBench, fitThresholds, setThresholdOverrides, thresholdOf, fittedTable } from '../lib/bench.js'
 import { CHANNEL_LIST, channelOf } from '../lib/channels.js'
 import { selectEngines } from '../lib/engines.js'
 import { percentiles } from '../lib/resilience.js'
@@ -169,6 +169,31 @@ test('the corpus fits its own threshold when the hand-picked cut is in the wrong
   const [noisyFit] = fitThresholds(noisy, noisyTrials, { flaky: 0.6 })
   assert.equal(noisyFit.separation, 0.5, 'interleaved: chance')
   assert.equal(noisyFit.trustworthy, false, 'a chance-level channel must not be re-cut')
+})
+
+test('a fitted table can actually be applied, and only sane values survive', () => {
+  const fixture = FIXTURES.find(item => item.channel === 'private_scan' && item.expect.kind === 'high')
+  const verdict = { level: 'info', headline: '', values: { [fixture.expect.field]: 0.3 } }
+  try {
+    setThresholdOverrides(undefined)
+    assert.equal(thresholdOf('private_scan'), 0.5, 'declared default when nothing is applied')
+    assert.equal(check(fixture, verdict).ok, false, 'a 0.3 reading misses a 0.5 cut')
+    // The corpus fitted 0.15 for this channel; applying it changes the decision.
+    setThresholdOverrides({ private_scan: 0.15 })
+    assert.equal(thresholdOf('private_scan'), 0.15)
+    assert.equal(check(fixture, verdict).ok, true, 'the applied cut is what judges')
+    // Garbage is dropped rather than silently narrowing every decision.
+    setThresholdOverrides({ private_scan: 1.7, risk: Number.NaN, flaky: 0.4 })
+    assert.equal(thresholdOf('private_scan'), 0.5, 'out-of-range value ignored')
+    assert.equal(thresholdOf('risk'), 0.6, 'NaN ignored')
+    assert.equal(thresholdOf('flaky'), 0.4)
+    assert.deepEqual(fittedTable([
+      { channel: 'a', current: 0.5, recommended: 0.2, accuracyNow: 0.8, accuracyFitted: 1, accuracyCrossVal: 0.95, n: 40, changes: true, separation: 1, trustworthy: true },
+      { channel: 'b', current: 0.5, recommended: 0.9, accuracyNow: 0.5, accuracyFitted: 0.9, accuracyCrossVal: 0.5, n: 8, changes: true, separation: 0.4, trustworthy: false },
+    ]), { a: 0.2 }, 'only trustworthy, changing fits are offered for application')
+  } finally {
+    setThresholdOverrides(undefined)
+  }
 })
 
 test('an unknown engine id surfaces instead of being silently dropped', () => {

@@ -31,7 +31,7 @@ import { serviceOf, type CredentialsService, type Logger, type WebRequestLike, t
 import { CHANNEL_LIST, channelOf, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
 import { hunksOf, unitsOf, type Unit } from './segments.js'
 import { jevEngine, layaEngine, selectEngines, trimState, type Engine } from './engines.js'
-import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, type Fixture, type Trial } from './bench.js'
+import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, fittedTable, setThresholdOverrides, thresholdOverrides, type Fixture, type Trial } from './bench.js'
 import { append, load, render, summarize, type LedgerRecord } from './ledger.js'
 import { KIT_DEFAULTS, loadStored, merge, saveStored, validate, type KitSettings } from './settings.js'
 
@@ -409,6 +409,7 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
       channels: CHANNEL_LIST.length,
       engines: config.engines,
       layaEndpoint: config.layaEndpoint,
+      thresholds: thresholdOverrides(),
       /** Compact `GROUP:id` list, for the card's catalogue section. */
       catalogue: CHANNEL_LIST.map(channel => `${channel.group}:${channel.id}`),
       health: {
@@ -797,7 +798,8 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
                  */
                 breaker = createBreaker({ failures: config.breakerFailures, cooldownMs: config.breakerCooldownMs })
                 cache = createCache<{ verdict: Verdict, ms: number }>(config.cacheMaxEntries, config.cacheTtlMs)
-                send(res, 200, { ok: true, settings: { enabled: config.enabled, maxItems: config.maxItems, requestTimeoutMs: config.requestTimeoutMs, callBudgetMs: config.callBudgetMs, concurrency: config.concurrency, cacheTtlMs: config.cacheTtlMs } })
+                setThresholdOverrides(config.thresholds)
+                send(res, 200, { ok: true, settings: { enabled: config.enabled, maxItems: config.maxItems, requestTimeoutMs: config.requestTimeoutMs, callBudgetMs: config.callBudgetMs, concurrency: config.concurrency, cacheTtlMs: config.cacheTtlMs, thresholds: thresholdOverrides() } })
                 return
               }
               if (req.method === 'POST' && route === 'bench') {
@@ -816,7 +818,14 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
                   reports.push(summarizeEngine(engine.id, engine.label, FIXTURES, trials, percentiles))
                 }
                 append(ledgerDir, { t: Date.now(), kind: 'bench', engines: engines.map(engine => engine.id), fixtures: FIXTURES.length })
-                send(res, 200, { ok: true, fixtures: FIXTURES.length, markdown: renderBench(reports, FIXTURES, body?.verbose === true) })
+                const table = fittedTable(reports.flatMap(report => report.thresholds))
+                send(res, 200, {
+                  ok: true,
+                  fixtures: FIXTURES.length,
+                  markdown: renderBench(reports, FIXTURES, body?.verbose === true),
+                  // Apply-ready: POST this back to /config under `thresholds`.
+                  thresholds: table,
+                })
                 return
               }
               if (req.method === 'POST' && route === 'heal-client') {
@@ -871,6 +880,12 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
   } catch { /* commands service absent */ }
 
   /* ── stored settings, then the API ──────────────────────────────────── */
+
+  /*
+   * Apply the fitted threshold table before anything is judged: a fit that is not
+   * applied is just a table in a report.
+   */
+  setThresholdOverrides(config.thresholds)
 
   const stored = loadStored(ledgerDir)
   if (stored) {

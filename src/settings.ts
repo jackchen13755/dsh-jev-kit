@@ -45,6 +45,12 @@ export interface KitSettings {
   localStateChars: number
   /** Cap on array fields (candidate lists, requirement lists) for local engines. */
   localMaxItems: number
+  /**
+   * Per-channel decision thresholds, fitted from the benchmark corpus
+   * (`POST /api/bench` returns an apply-ready table). Empty means the declared
+   * defaults, which is not the same as "no opinion": a cut is always in force.
+   */
+  thresholds: Record<string, number>
 }
 
 export const KIT_DEFAULTS: KitSettings = {
@@ -63,6 +69,7 @@ export const KIT_DEFAULTS: KitSettings = {
   redactExtra: [],
   localStateChars: 600,
   localMaxItems: 12,
+  thresholds: {},
 }
 
 const BOUNDS: Record<string, [number, number]> = {
@@ -83,6 +90,9 @@ const BOUNDS: Record<string, [number, number]> = {
 /** Validate a settings object, naming the field and its range. */
 export function validate (value: KitSettings): string | undefined {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value.apiKeyRef)) return `apiKeyRef 必须形如 ENV_VAR_NAME（当前 ${JSON.stringify(value.apiKeyRef)}）`
+  for (const [channel, cut] of Object.entries(value.thresholds ?? {})) {
+    if (typeof cut !== 'number' || !Number.isFinite(cut) || cut < 0 || cut > 1) return `thresholds.${channel} 必须在 0–1 之间（当前 ${JSON.stringify(cut)}）`
+  }
   for (const [field, [min, max]] of Object.entries(BOUNDS)) {
     const number = (value as unknown as Record<string, unknown>)[field]
     if (typeof number !== 'number' || !Number.isFinite(number)) return `${field} 必须是数字`
@@ -98,6 +108,9 @@ export function merge (base: KitSettings, patch: unknown): KitSettings {
   if (typeof input.enabled === 'boolean') out.enabled = input.enabled
   if (typeof input.apiKeyRef === 'string' && input.apiKeyRef.trim()) out.apiKeyRef = input.apiKeyRef.trim()
   if (Array.isArray(input.redactExtra)) out.redactExtra = input.redactExtra.filter((x): x is string => typeof x === 'string')
+  if (input.thresholds && typeof input.thresholds === 'object') {
+    out.thresholds = Object.fromEntries(Object.entries(input.thresholds).filter(([, cut]) => typeof cut === 'number' && Number.isFinite(cut) && cut >= 0 && cut <= 1))
+  }
   for (const field of Object.keys(BOUNDS) as Array<keyof KitSettings>) {
     const value = input[field]
     if (typeof value === 'number' && Number.isFinite(value)) (out[field] as number) = value

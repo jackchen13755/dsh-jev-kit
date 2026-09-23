@@ -31,6 +31,12 @@ export interface KitSettings {
     localStateChars: number;
     /** Cap on array fields (candidate lists, requirement lists) for local engines. */
     localMaxItems: number;
+    /**
+     * Per-channel decision thresholds, fitted from the benchmark corpus
+     * (`POST /api/bench` returns an apply-ready table). Empty means the declared
+     * defaults, which is not the same as "no opinion": a cut is always in force.
+     */
+    thresholds: Record<string, number>;
 }
 export declare const KIT_DEFAULTS: KitSettings;
 /** Validate a settings object, naming the field and its range. */
