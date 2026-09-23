@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { FIXTURES, separation, check, questionsFor, verdictFor, summarizeEngine, renderBench } from '../lib/bench.js'
+import { FIXTURES, COMMAND_FIXTURES, separation, check, questionsFor, verdictFor, summarizeEngine, renderBench } from '../lib/bench.js'
 import { CHANNEL_LIST, channelOf } from '../lib/channels.js'
 import { selectEngines } from '../lib/engines.js'
 import { percentiles } from '../lib/resilience.js'
@@ -20,10 +20,14 @@ test('every fixture states its ground truth and names a real channel', () => {
   const ids = FIXTURES.map(fixture => fixture.id)
   assert.equal(new Set(ids).size, ids.length, 'fixture ids are unique')
   for (const fixture of FIXTURES) {
-    assert.ok(channelOf(fixture.channel), `${fixture.id} names a known channel`)
+    // Either it names a real channel, or it brings its own questions (`-` + questions).
+    assert.ok(channelOf(fixture.channel) || fixture.questions, `${fixture.id} must name a channel or supply its own questions`)
     assert.ok(fixture.truth.length > 6, `${fixture.id} must state what is true about the input`)
     assert.ok(Object.keys(questionsFor(fixture).questions).length > 0, `${fixture.id} must produce at least one question`)
   }
+  assert.ok(COMMAND_FIXTURES.length >= 10, 'the auto-channel wording needs a real command set')
+  assert.equal(COMMAND_FIXTURES.filter(fixture => fixture.expect.kind === 'high').length,
+    COMMAND_FIXTURES.filter(fixture => fixture.expect.kind === 'low').length, 'dangerous and safe commands in balance')
   // Separation is only computable where a channel has both a high and a low case.
   const byChannel = new Map()
   for (const fixture of FIXTURES) {
@@ -49,6 +53,7 @@ test('every fixture scores a field its channel actually publishes', () => {
    */
   for (const channel of CHANNEL_LIST) {
     const own = FIXTURES.filter(fixture => fixture.channel === channel.id)
+    // Raw-question fixtures are checked by construction below, not by channel reader.
     if (!own.length) continue
     const questions = channel.questions({ text: 'TEXT', task: 'TASK', other: 'OTHER', candidates: ['C1', 'C2'], requirements: ['R1'], candidateNoun: 'thing' })
     // A synthetic answer for every question, in the shape the reader expects.

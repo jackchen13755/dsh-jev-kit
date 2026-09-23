@@ -57,7 +57,7 @@ dsh plugin --profile web add github:jackchen13755/dsh-jev-kit
 | `jev_kit_memory { mode: write\|conflict\|rerank }` | **优先事项 2** + 组 D |
 | `jev_kit_triage { kind: log\|alert\|bug\|flaky, items, context }` | 组 C：批量分诊 + 汇总 |
 | `jev_kit_pick { task, candidates, noun }` | 组 C：带 no-match 的选择 |
-| `jev_kit_bench { engines?, verbose? }` | **引擎对照测量**：夹具跑遍每个引擎，出分离度/达到真值/延迟 |
+| `jev_kit_bench { engines?, verbose? }` | **引擎对照测量**：32 条夹具（含 lens 命令措辞 12 条）跑遍每个引擎，出分离度/达到真值/延迟 |
 | `jev_kit_status` / `jev_kit_report [days]` | 运行态 / 按通道的账本报告 |
 | `/jev-kit channels\|report\|status` | 同上，命令行 |
 
@@ -124,7 +124,33 @@ jev_kit_bench { engines: ["jev", "laya"], verbose: true }
 
 夹具 20 条，**真值由构造给定**（那段文本里确实有连接串凭据、那个 hunk 确实是顺手加的），真值**不会发给引擎**；引擎不可用时它的那一列是空的，**"没测出来"绝不等于"没问题"**，也不计入分母。
 
-### 基线（2026-09-22 本机实测，Jev 1.13.0）
+### 实测结论（2026-09-23 本机，Apple M2 16GB，ONNX Runtime CPU）
+
+**双引擎都真跑了**（Laya 走 `@receptron/laya` + ONNX，无 Python；权重 1.69GB 经 hf-mirror 灌入缓存）：
+
+| | Jev（托管） | Laya（本地 ONNX，english checkpoint） |
+|---|---|---|
+| 达到真值 | **32/32** | 21/32 |
+| p50 / p95 | **533ms / 612ms** | 942ms / 1459ms |
+| 分离度 1.00 的通道 | private_scan · scope_check · retry · risk · sufficient · flaky · memory_write · **lens:destructive** | scope_check · retry · risk · sufficient · memory_write |
+| 明显落后的通道 | — | **lens:destructive 0.33**（命令危险判定）· flaky 0.00 · private_scan 0.50 |
+
+**结论（本机、本夹具集）**：Laya **没有**赢。三个原因，按重要性排：
+
+1. **基础 checkpoint 在自定义 schema 上接近瞎猜。** 模型卡自己写了：typed-decisions 上 zero-shot 0.362（随机 0.318、多数类 0.461），那个 0.766 属于在同 benchmark 训练集上微调过的 checkpoint。本机实测印证：删相册 `rm -rf ~/Pictures/2024` 只给 0.24–0.28，而删临时文件 `/tmp/build.log` 反倒给 0.53–0.65 —— **方向是反的**。
+2. **不是语言问题。** 我把 lens 的中文问句原样翻译成英文各测一遍（同一批命令）：英文措辞**没有**改善（0.24–0.52），所以"换个 checkpoint 就好"不成立；瓶颈是能力，不是文字。
+3. **本机 CPU 上它更慢。** 厂商的 32.8ms 是 **T4 GPU**；文档里 CPU 预加载是 193–464ms，而我们这些 state 较大（段落 1500 字 / hunk 60 行 / 候选列表），实测 p50 942ms > Jev 533ms。MLX（M3 Max 13.4ms）是另一条路，但那是"换运行时"而不是"换模型"，且解决不了第 1 条。
+
+**但有一个反直觉的正面结果**：kit 自己的 `risk` 通道（不可逆/外部副作用，英文措辞）在 Laya 上**分离度 1.00**，而 lens 的 `destructive`（中文、数据丢失措辞）只有 0.33 —— **同一台模型、同一批命令，换个问法就从瞎猜变满分**。这是"**问句即标定**"第一次跨引擎被实测出来：**问句不能移植，本地模型尤其不能**（阈值和措辞都得按通道重标）。
+
+**要走本地路线的正确姿势**（如果将来要做）：不是"把 Jev 的问句搬到 Laya"，而是**每个通道在 Laya 上重新标定**——先按通道测分离度，分离度达标的才迁；达不到的留在 Jev。本测量台就是为这件事造的。
+
+**已知限制（诚实列出）**：
+- ONNX 路线**只发布了英文 bundle**（`receptron/laya-onnx` 只有根目录那一套）；多语种 checkpoint 要自己导出 ONNX（Python 3.12 + torch）或走 PyTorch，本次未做。
+- 服务端是单线程 HTTP，bench 串行调用；真实并发下的吞吐未测。
+- 未做温度标定（厂商说出厂 ECE 0.21–0.47，标定后 0.081）——这会影响**阈值通过率**，不影响本次用的**分离度**。
+
+### Jev 基线（同一夹具集，2026-09-22/23）
 
 ```
 20/20 达到真值 · p50 507ms · p95 973ms
@@ -134,7 +160,19 @@ sufficient   2/2 1.00 · flaky 2/2 1.00 · memory_write 2/2 1.00
 failure_triage 1/1 · log_triage 2/2 · i18n_key 2/2   （分类题，按达到真值数比较）
 ```
 
-Laya 那一列在装上之前是空的——这不是"略过"，是"未测量"。
+本机 Laya 的部署方式（已归档进仓库）：
+
+```bash
+# 1) 装 ONNX 运行时（Node 20+，不需要 Python）
+mkdir laya-runtime && cd laya-runtime && npm i @receptron/laya
+npm install-scripts approve onnxruntime-node && npm rebuild onnxruntime-node   # npm 11 默认拦 postinstall
+# 2) 权重 1.69GB：huggingface.co 直连不通时用镜像灌缓存（比走代理快 20 倍）
+#    ~/.cache/receptron-laya/receptron--laya-onnx/main/{laya.onnx,laya.onnx.data,laya_config.json,tokenizer/*}
+# 3) 起服务
+node scripts/laya-server.mjs --port 8791        # 或用 --subfolder multilingual（需自备 bundle）
+```
+
+`scripts/laya-server.mjs` 是**本机实测跑通的那个**（`scripts/laya-server.py` 是 PyTorch/多语种路线的参考实现）。它把 `noul` 的 true/false 措辞折进 instructions——**丢掉这一对，极性就没人审计了**，答反了会看起来像模型失败而不是接线错误。
 
 ### 测量台第一次运行就抓到了一个真问题
 

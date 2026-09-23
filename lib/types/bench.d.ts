@@ -46,12 +46,24 @@ export type Expectation =
 };
 export interface Fixture {
     id: string;
+    /**
+     * The kit channel to judge with, or `-` when the fixture supplies its own
+     * questions. Supplying them verbatim is how a *different* plugin's wording gets
+     * measured without copying its channel here: a copy would drift, and then the
+     * benchmark would compare two adapters instead of two engines.
+     */
     channel: string;
     /** What a human would say is true about this input — the scoring key. */
     truth: string;
     expect: Expectation;
     state: ChannelState;
+    /** Raw questions, used as-is when present (see `channel`). */
+    questions?: Record<string, JevQuestion>;
+    /** Verdict reader for a raw fixture; defaults to reading `expect.field`. */
+    read?: (answers: Record<string, JevAnswer>) => Verdict;
 }
+export declare const COMMAND_FIXTURES: Fixture[];
+/** Everything the benchmark runs: kit channels plus the lens's command wording. */
 export declare const FIXTURES: Fixture[];
 export interface Trial {
     fixture: string;
@@ -113,5 +125,5 @@ export declare function questionsFor(fixture: Fixture): {
     questions: Record<string, JevQuestion>;
     state: ChannelState;
 };
-/** Read a fixture's verdict from raw answers, using its channel's own reader. */
+/** Read a fixture's verdict from raw answers: its own reader, its channel's, or a plain field read. */
 export declare function verdictFor(fixture: Fixture, answers: Record<string, JevAnswer>): Verdict;

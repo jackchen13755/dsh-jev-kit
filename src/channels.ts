@@ -42,6 +42,11 @@ export interface Verdict {
 export interface ChannelState {
   /** The thing under judgment: a segment, a hunk, a tool result, a diff. */
   text?: string
+  /**
+   * A shell command, for the fixtures that measure another plugin's wording
+   * verbatim (`dsh-jev-lens` names this field `command`, not `text`).
+   */
+  command?: string
   /** The user's request or task, when the judgment is relative to one. */
   task?: string
   /** A shortlist to choose from (components, tests, skills, memories). */
