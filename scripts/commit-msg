@@ -17,7 +17,20 @@ message_file="${1:-}"
 message=$(grep -v '^#' "$message_file" | sed '/^[[:space:]]*$/d' || true)
 [ -z "$message" ] && exit 0
 
-diff=$(git diff --cached --no-color -U0 || true)
+# Judge the diff the message is *about* — generated artifacts excluded.
+#
+# `lib/` and `*.map` are the compiled twin of a source change already in this same diff,
+# and no commit message can describe a minified source map. Measured on this repository:
+# 15 of 15 source-map hunks came back `unrelated` while the source hunks beside them were
+# fine, so every commit that refreshed `lib/` read as 夹带无关改动 — a false positive
+# that had been invisible only because the oversized judgment used to fail silently.
+#
+# Deliberately *not* the `.jev-kit-skip` list the push scan uses: that one also skips
+# tests, docs and fixtures, because those necessarily contain credential-shaped text.
+# The message check has no such excuse — tests and docs are exactly where 顺手改了点别的
+# hides, so they stay in scope here.
+skip_pathspecs=(":(exclude)lib/" ":(exclude)dist/" ":(exclude)build/" ":(exclude)*.map" ":(exclude)*.min.js")
+diff=$(git diff --cached --no-color -U0 -- . "${skip_pathspecs[@]}" || true)
 [ -z "$diff" ] && exit 0
 
 payload=$(DIFF="$diff" MSG="$message" python3 -c 'import json,os; print(json.dumps({"message": os.environ["MSG"], "diff": os.environ["DIFF"]}))' 2>/dev/null || true)
