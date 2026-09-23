@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+#
+# dsh-jev-kit pre-push hook — semantic privacy scan of what is about to be pushed.
+#
+# Why a hook: the privacy channel is the toolkit's most valuable judgment, and it
+# was called **twice** in an entire working session because a tool only fires when
+# a model remembers to ask. A hook fires whether or not anyone remembers — the same
+# reason the lens's command guard is useful.
+#
+# What it checks: the commits actually being pushed (`<remote-sha>..<local-sha>`),
+# added lines only. Not the working tree, not the whole history.
+#
+# Failure policy — deliberately asymmetric:
+#   · plugin unreachable  → **warn and allow**. A scanner that blocks pushes when
+#     it is down is worse than no scanner: it trains people to use --no-verify.
+#   · findings            → **block**, with the excerpts and an explicit escape
+#     hatch (`JEV_ALLOW_PUSH=1 git push`), because a bypass should be a decision
+#     someone makes on purpose, not a habit.
+#   · zero findings       → allow silently.
+#
+# Install (per repository):
+#   bash scripts/install-hooks.sh
+#
+# Environment:
+#   JEV_KIT_ENDPOINT   default http://127.0.0.1:3080/dsh-jev-kit/api/scan-private
+#   JEV_SKIP_PRIVACY=1 skip this hook entirely (no request is made)
+#   JEV_ALLOW_PUSH=1   run the scan, report findings, but do not block
+#
+set -uo pipefail
+
+ENDPOINT="${JEV_KIT_ENDPOINT:-http://127.0.0.1:3080/dsh-jev-kit/api/scan-private}"
+[ "${JEV_SKIP_PRIVACY:-0}" = "1" ] && exit 0
+
+# The hook's stdin is one line per ref being pushed:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# An all-zero remote sha means "new branch": there is no remote side to diff from.
+range=""
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  if [ -z "${local_sha:-}" ]; then continue
+  fi
+  case "${remote_sha:-}" in
+    ""|0000000000000000000000000000000000000000)
+      # New branch: compare against the merge base with the default branch when we
+      # can find one, else the last commit only.
+      base=$(git merge-base "$local_sha" origin/HEAD 2>/dev/null || git rev-parse "$local_sha^" 2>/dev/null || echo "")
+      [ -n "$base" ] && range="$base..$local_sha"
+      ;;
+    *)
+      range="$remote_sha..$local_sha"
+      ;;
+  esac
+  [ -n "$range" ] && break
+done
+
+if [ -z "$range" ]; then
+  echo "jev-kit pre-push: 无法确定推送范围，跳过扫描（不阻塞）" >&2
+  exit 0
+fi
+
+diff=$(git diff --no-color -U0 "$range" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+' || true)
+if [ -z "$diff" ]; then
+  exit 0   # nothing added: nothing to leak
+fi
+
+# JSON-encode without depending on jq (python3 ships with the harness).
+payload=$(DIFF="$diff" python3 -c 'import json,os; print(json.dumps({"diff": os.environ["DIFF"]}))' 2>/dev/null) || {
+  echo "jev-kit pre-push: 无法构造请求体（缺 python3？），跳过扫描（不阻塞）" >&2
+  exit 0
+}
+
+response=$(curl -sS -m 90 -X POST "$ENDPOINT" -H 'content-type: application/json' -d "$payload" 2>/dev/null)
+if [ -z "$response" ]; then
+  echo "jev-kit pre-push: ⚠️ 扫描器不可达（$ENDPOINT）——本次不阻塞推送。" >&2
+  echo "         启动方式：cd ~/Desktop/dsh/github/dsh-jev-kit && dsh web（插件随宿主启动）" >&2
+  exit 0
+fi
+
+flagged=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("flagged", 0))' 2>/dev/null || echo 0)
+if [ "$flagged" = "0" ]; then
+  exit 0
+fi
+
+echo "" >&2
+printf '%s' "$response" | python3 -c '
+import json, sys
+# No backslashes inside f-string expressions (Python < 3.12 rejects them): the
+# first version of this printer died with a SyntaxError and printed nothing, which
+# would have looked like "the hook ran and had nothing to say".
+data = json.load(sys.stdin)
+count = data.get("flagged", 0)
+print("jev-kit pre-push: 语义隐私扫描发现 %s 处疑似泄漏（正则扫描是另一层，请照跑）" % count, file=sys.stderr)
+for finding in data.get("findings", []):
+    where = finding.get("where") or "(no location)"
+    headline = finding.get("headline") or ""
+    print("  · %s — %s" % (where, headline), file=sys.stderr)
+print("", file=sys.stderr)
+print(data.get("markdown", ""), file=sys.stderr)
+'
+echo "确认后重推：JEV_ALLOW_PUSH=1 git push（本次确属夹具/文档示例时）；或先修掉这些内容。" >&2
+echo "永久跳过本仓库：JEV_SKIP_PRIVACY=1 git push，或删除 .git/hooks/pre-push。" >&2
+
+[ "${JEV_ALLOW_PUSH:-0}" = "1" ] && exit 0
+exit 1
