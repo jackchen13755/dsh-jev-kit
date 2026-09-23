@@ -46,6 +46,15 @@ export interface KitSettings {
   /** Cap on array fields (candidate lists, requirement lists) for local engines. */
   localMaxItems: number
   /**
+   * Channels turned off by name.
+   *
+   * The report's advice — "a channel that never produces a non-neutral verdict is
+   * not earning its keep" — had no mechanism behind it: the only way to retire one
+   * was to edit the source. A disabled channel refuses cleanly and says why, so a
+   * catalogue of 23 can shrink to the ones that actually fire.
+   */
+  disabledChannels: string[]
+  /**
    * Per-channel decision thresholds, fitted from the benchmark corpus
    * (`POST /api/bench` returns an apply-ready table). Empty means the declared
    * defaults, which is not the same as "no opinion": a cut is always in force.
@@ -70,6 +79,7 @@ export const KIT_DEFAULTS: KitSettings = {
   localStateChars: 600,
   localMaxItems: 12,
   thresholds: {},
+  disabledChannels: [],
 }
 
 const BOUNDS: Record<string, [number, number]> = {
@@ -90,6 +100,9 @@ const BOUNDS: Record<string, [number, number]> = {
 /** Validate a settings object, naming the field and its range. */
 export function validate (value: KitSettings): string | undefined {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value.apiKeyRef)) return `apiKeyRef 必须形如 ENV_VAR_NAME（当前 ${JSON.stringify(value.apiKeyRef)}）`
+  for (const channel of value.disabledChannels ?? []) {
+    if (!/^[a-z][a-z0-9_:-]*$/.test(channel)) return `disabledChannels 里有不合法的通道名：${JSON.stringify(channel)}`
+  }
   for (const [channel, cut] of Object.entries(value.thresholds ?? {})) {
     if (typeof cut !== 'number' || !Number.isFinite(cut) || cut < 0 || cut > 1) return `thresholds.${channel} 必须在 0–1 之间（当前 ${JSON.stringify(cut)}）`
   }
@@ -108,6 +121,7 @@ export function merge (base: KitSettings, patch: unknown): KitSettings {
   if (typeof input.enabled === 'boolean') out.enabled = input.enabled
   if (typeof input.apiKeyRef === 'string' && input.apiKeyRef.trim()) out.apiKeyRef = input.apiKeyRef.trim()
   if (Array.isArray(input.redactExtra)) out.redactExtra = input.redactExtra.filter((x): x is string => typeof x === 'string')
+  if (Array.isArray(input.disabledChannels)) out.disabledChannels = input.disabledChannels.filter((x): x is string => typeof x === 'string')
   if (input.thresholds && typeof input.thresholds === 'object') {
     out.thresholds = Object.fromEntries(Object.entries(input.thresholds).filter(([, cut]) => typeof cut === 'number' && Number.isFinite(cut) && cut >= 0 && cut <= 1))
   }

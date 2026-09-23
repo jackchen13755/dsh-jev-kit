@@ -11,6 +11,10 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { percentiles } from './resilience.js'
+import { CHANNEL_LIST } from './channels.js'
+
+/** The full catalogue, so the report can name what was never used. */
+const ALL_CHANNELS = CHANNEL_LIST.map(channel => channel.id)
 
 export type LedgerRecord =
   | {
@@ -18,6 +22,8 @@ export type LedgerRecord =
     /** The verdict's headline numbers (probabilities, choices, scores). */
     values: Record<string, number | string | undefined>
     ms?: number; via?: 'jev' | 'cache'; chars: number; item?: number
+    /** Wording fingerprint of the channel at decision time (drift detection). */
+    qh?: string
     /** Set when the caller reported whether it acted on the advice. */
     acted?: boolean
   }
@@ -76,6 +82,14 @@ export interface KitReport {
   health: { degraded: number; errors: number }
   /** Benchmark trials, grouped by engine — the evidence for moving a channel. */
   bench: { trials: number; byEngine: Record<string, { n: number, pass: number }> }
+  /**
+   * Channels never used for real work.
+   *
+   * The corpus proves a channel *can* judge; only usage proves anyone wants it.
+   * Measured 2026-09-23: 16 of 23 channels had never been called outside the
+   * benchmark — the report should say so rather than implying they are in service.
+   */
+  unusedChannels: string[]
 }
 
 const mean = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0)
@@ -114,6 +128,10 @@ export function summarize (records: LedgerRecord[], days: number, usdPerMTok = 0
       degraded: records.filter(r => r.kind === 'degraded').length,
       errors: records.filter(r => r.kind === 'error').length,
     },
+    unusedChannels: (() => {
+      const used = new Set(decisions.map(row => row.channel))
+      return ALL_CHANNELS.filter(channel => !used.has(channel))
+    })(),
     bench: (() => {
       const trials = records.filter((r): r is Extract<LedgerRecord, { kind: 'trial' }> => r.kind === 'trial')
       const byEngine: Record<string, { n: number, pass: number }> = {}
@@ -146,6 +164,10 @@ export function render (report: KitReport): string {
     report.health.degraded || report.health.errors
       ? `⚠️ 降级 ${report.health.degraded} · 失败 ${report.health.errors}（失败永远不记成"没问题"）`
       : '无降级、无失败',
+    '',
+    report.unusedChannels.length
+      ? `从未被真实调用过的通道（${report.unusedChannels.length}）：${report.unusedChannels.map(c => `\`${c}\``).join(' · ')} —— 评测能证明"它能判"，只有用法能证明"有人要"。停用它们：设置里的 disabledChannels。`
+      : '每个通道都被真实调用过。',
     '',
     '读法：**这个表是用来淘汰通道的**。某个通道次数不少但 flag/warn 长期为 0，说明它在你的语料上不产生信息——那就别用了，别留着自我安慰。',
   )

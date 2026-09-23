@@ -1,30 +1,3 @@
-/**
- * The benchmark: fixtures with ground truth, run through every configured engine.
- *
- * The question "should this decision move to a local model?" cannot be answered by
- * a model card, because the models are calibrated differently — Laya ships
- * over-confident and needs per-domain temperature fitting, while Jev's probability
- * is documented as a ranking signal rather than a probability. Judging both with
- * one threshold would measure calibration, not capability.
- *
- * So the primary metric here is **separation**: for each channel, do the fixtures
- * whose answer should come out high actually score above the ones that should come
- * out low? That is threshold-free and transfers across engines. The thresholded
- * pass rate is reported next to it, as a secondary, because it is how the channel
- * really decides.
- *
- * Two further commitments:
- *
- *   · **Ground truth is set by construction.** A fixture's expectation comes from
- *     what a human would say about that text (it does contain a connection string
- *     with a password; that hunk really is a drive-by addition), never from what
- *     any model answered. The expectation never reaches the engine.
- *   · **A categorical answer is not a probability.** Choice fixtures are scored by
- *     exact match, and contribute nothing to separation, rather than being
- *     flattened into a number that would look like a probability.
- *
- * @module dsh-jev-kit/bench
- */
 import { type ChannelState, type Verdict } from './channels.js';
 import type { JevAnswer, JevQuestion } from './jev.js';
 export type Expectation = 
@@ -133,6 +106,18 @@ export interface ThresholdFit {
     /** True when the fitted cut is worth acting on (enough separation to trust it). */
     trustworthy: boolean;
 }
+/**
+ * A short fingerprint of a channel's wording.
+ *
+ * Wording *is* the calibration: this project has already shipped one polarity
+ * inversion and one reworded channel, and in both cases the thresholds silently
+ * stopped meaning what they meant. Recording the hash makes "the questions
+ * changed" a fact the report can state instead of something a reader has to
+ * remember, and the benchmark can refuse to compare a fit from before the change.
+ */
+export declare function questionHash(channelId: string): string;
+/** The wording fingerprint of every channel, for the report and the check mode. */
+export declare const questionHashes: () => Record<string, string>;
 /** Separation below which a fitted threshold is noise rather than calibration. */
 export declare const FITTABLE_SEPARATION = 0.75;
 /** Apply a fitted table (channel id → cut). Values outside 0..1 are ignored. */
@@ -145,6 +130,26 @@ export declare const thresholdOverrides: () => Record<string, number>;
 export declare function fittedTable(fits: ThresholdFit[]): Record<string, number>;
 /** Fit one cut per numeric channel from labelled values. */
 export declare function fitThresholds(fixtures: Fixture[], trials: Trial[], current?: Record<string, number>): ThresholdFit[];
+/** What a benchmark run leaves behind for the card and for change detection. */
+export interface BenchRecord {
+    at: number;
+    fixtures: number;
+    engines: string[];
+    /** Apply-ready table (trustworthy fits only). */
+    thresholds: Record<string, number>;
+    /** The per-channel numbers behind that table. */
+    details: ThresholdFit[];
+    /** Wording fingerprints at the time of the run. */
+    hashes: Record<string, string>;
+}
+/**
+ * Channels whose questions changed since the recorded run.
+ *
+ * A separation number measured against different wording is not a regression and not
+ * an improvement — it is a different question. Naming them is the difference between
+ * "the numbers moved" and "the ruler changed".
+ */
+export declare function wordingDrift(record: BenchRecord | undefined, current?: Record<string, string>): string[];
 export interface EngineReport {
     engine: string;
     label: string;

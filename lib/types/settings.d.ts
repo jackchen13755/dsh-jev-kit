@@ -32,6 +32,15 @@ export interface KitSettings {
     /** Cap on array fields (candidate lists, requirement lists) for local engines. */
     localMaxItems: number;
     /**
+     * Channels turned off by name.
+     *
+     * The report's advice — "a channel that never produces a non-neutral verdict is
+     * not earning its keep" — had no mechanism behind it: the only way to retire one
+     * was to edit the source. A disabled channel refuses cleanly and says why, so a
+     * catalogue of 23 can shrink to the ones that actually fire.
+     */
+    disabledChannels: string[];
+    /**
      * Per-channel decision thresholds, fitted from the benchmark corpus
      * (`POST /api/bench` returns an apply-ready table). Empty means the declared
      * defaults, which is not the same as "no opinion": a cut is always in force.

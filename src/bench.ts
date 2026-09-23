@@ -25,7 +25,8 @@
  *
  * @module dsh-jev-kit/bench
  */
-import { channelOf, DEFAULT_THRESHOLDS, type ChannelState, type Verdict } from './channels.js'
+import { createHash } from 'node:crypto'
+import { CHANNEL_LIST, channelOf, DEFAULT_THRESHOLDS, type ChannelState, type Verdict } from './channels.js'
 import { CORPUS } from './corpus.js'
 import type { JevAnswer, JevQuestion } from './jev.js'
 
@@ -268,6 +269,26 @@ export interface ThresholdFit {
   trustworthy: boolean
 }
 
+/**
+ * A short fingerprint of a channel's wording.
+ *
+ * Wording *is* the calibration: this project has already shipped one polarity
+ * inversion and one reworded channel, and in both cases the thresholds silently
+ * stopped meaning what they meant. Recording the hash makes "the questions
+ * changed" a fact the report can state instead of something a reader has to
+ * remember, and the benchmark can refuse to compare a fit from before the change.
+ */
+export function questionHash (channelId: string): string {
+  const channel = channelOf(channelId)
+  if (!channel) return 'unknown'
+  const spec = { instructions: null, questions: channel.questions({ text: 'T', task: 'T', other: 'O', candidates: ['C'], requirements: ['R'], candidateNoun: 'n' }), at: channel.at, per: channel.per }
+  return createHash('sha256').update(JSON.stringify(spec)).digest('hex').slice(0, 10)
+}
+
+/** The wording fingerprint of every channel, for the report and the check mode. */
+export const questionHashes = (): Record<string, string> =>
+  Object.fromEntries(CHANNEL_LIST.map(channel => [channel.id, questionHash(channel.id)]))
+
 /** Separation below which a fitted threshold is noise rather than calibration. */
 export const FITTABLE_SEPARATION = 0.75
 
@@ -360,6 +381,31 @@ export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Re
     })
   }
   return out.sort((a, b) => (b.accuracyFitted - b.accuracyNow) - (a.accuracyFitted - a.accuracyNow))
+}
+
+/** What a benchmark run leaves behind for the card and for change detection. */
+export interface BenchRecord {
+  at: number
+  fixtures: number
+  engines: string[]
+  /** Apply-ready table (trustworthy fits only). */
+  thresholds: Record<string, number>
+  /** The per-channel numbers behind that table. */
+  details: ThresholdFit[]
+  /** Wording fingerprints at the time of the run. */
+  hashes: Record<string, string>
+}
+
+/**
+ * Channels whose questions changed since the recorded run.
+ *
+ * A separation number measured against different wording is not a regression and not
+ * an improvement — it is a different question. Naming them is the difference between
+ * "the numbers moved" and "the ruler changed".
+ */
+export function wordingDrift (record: BenchRecord | undefined, current: Record<string, string> = questionHashes()): string[] {
+  if (!record) return []
+  return Object.entries(record.hashes).filter(([channel, hash]) => current[channel] !== undefined && current[channel] !== hash).map(([channel]) => channel)
 }
 
 export interface EngineReport {

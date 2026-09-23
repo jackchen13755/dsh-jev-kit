@@ -31,7 +31,7 @@ import { serviceOf, type CredentialsService, type Logger, type WebRequestLike, t
 import { CHANNEL_LIST, channelOf, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
 import { hunksOf, unitsOf, type Unit } from './segments.js'
 import { jevEngine, layaEngine, selectEngines, trimState, type Engine } from './engines.js'
-import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, fittedTable, setThresholdOverrides, thresholdOverrides, type Fixture, type Trial } from './bench.js'
+import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, fittedTable, setThresholdOverrides, thresholdOverrides, questionHash, questionHashes, wordingDrift, type BenchRecord, type Fixture, type ThresholdFit, type Trial } from './bench.js'
 import { append, load, render, summarize, type LedgerRecord } from './ledger.js'
 import { KIT_DEFAULTS, loadStored, merge, saveStored, validate, type KitSettings } from './settings.js'
 
@@ -309,7 +309,7 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     auth.fingerprint = ''
     const verdict = channel.read(answer.answers, channelState)
     cache.set(cacheKey, { verdict, ms: answer.ms })
-    append(ledgerDir, { t: Date.now(), kind: 'decision', channel: channel.id, group: channel.group, level: verdict.level, values: verdict.values, via: 'jev', ms: answer.ms, chars })
+    append(ledgerDir, { t: Date.now(), kind: 'decision', channel: channel.id, group: channel.group, level: verdict.level, values: verdict.values, via: 'jev', ms: answer.ms, chars, qh: questionHash(channel.id) })
     return { where: '', verdict, ms: answer.ms, via: 'jev', chars }
   }
 
@@ -317,6 +317,9 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
   async function runUnits (channelId: string, units: Unit[], session: string, extra: ChannelState = {}): Promise<CallResult> {
     const channel = channelOf(channelId)
     if (!channel) throw new Error(`unknown channel: ${channelId}`)
+    if (config.disabledChannels.includes(channel.id)) {
+      return { channel: channel.id, title: channel.title, items: [], skipped: units.length, degraded: 0, errors: [], stopReason: `通道已停用（settings.disabledChannels）：${channel.id}` }
+    }
     const started = Date.now()
     const capped = units.slice(0, config.maxItems)
     const items: ItemResult[] = []
@@ -354,6 +357,9 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
   async function runInput (channelId: string, channelState: ChannelState, session: string): Promise<CallResult> {
     const channel = channelOf(channelId)
     if (!channel) throw new Error(`unknown channel: ${channelId}`)
+    if (config.disabledChannels.includes(channel.id)) {
+      return { channel: channel.id, title: channel.title, items: [], skipped: 0, degraded: 0, errors: [], stopReason: `通道已停用（settings.disabledChannels）：${channel.id}` }
+    }
     const result = await judge(channel, channelState, session)
     return {
       channel: channel.id,
@@ -407,6 +413,7 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
         cacheTtlMs: config.cacheTtlMs,
       },
       channels: CHANNEL_LIST.length,
+      disabledChannels: config.disabledChannels,
       engines: config.engines,
       layaEndpoint: config.layaEndpoint,
       thresholds: thresholdOverrides(),
@@ -432,7 +439,27 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     return entries.length ? entries.map(([why, n]) => `${String(n).padStart(4)} × ${why}`).join('\n') : '无（每次调用都走到了判定）'
   }
 
-  /* ── tools ──────────────────────────────────────────────────────────── */
+  /* ── reading the working tree ───────────────────────────────────────── */
+
+/**
+ * Read a git diff without a shell.
+ *
+ * `execFile` with an argument array (no shell interpolation) and a bounded timeout:
+ * this asks git for one diff in one repository and nothing else. The path comes from
+ * the caller's own command line, never from fetched content.
+ */
+async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Promise<{ diff: string, error?: string }> {
+  const { execFile } = await import('node:child_process')
+  const args = ['-C', repo, 'diff', '--no-color', '-U0', ...(staged ? ['--cached'] : [])]
+  return await new Promise((resolve) => {
+    execFile('git', args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) { resolve({ diff: '', error: `${error.message.split('\n')[0]}${stderr ? ` · ${String(stderr).trim().slice(0, 160)}` : ''}` }); return }
+      resolve({ diff: stdout })
+    })
+  })
+}
+
+/* ── tools ──────────────────────────────────────────────────────────── */
 
   const str = (value: unknown, fallback = ''): string => (typeof value === 'string' ? value : fallback)
   const list = (value: unknown): string[] => (Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string') : [])
@@ -458,7 +485,10 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
         const own = rows.filter(channel => channel.group === group)
         if (!own.length) continue
         lines.push(`**${groupName[group]}**`)
-        for (const channel of own) lines.push(`  · \`${channel.id}\`（${channel.per === 'item' ? '逐条' : '整体'}）— ${channel.title}：${channel.intent}`)
+        for (const channel of own) {
+          const off = config.disabledChannels.includes(channel.id) ? ' **[已停用]**' : ''
+          lines.push(`  · \`${channel.id}\`（${channel.per === 'item' ? '逐条' : '整体'}）— ${channel.title}：${channel.intent}${off}`)
+        }
         lines.push('')
       }
       lines.push('用法：`jev_kit_decide { channel, text, task, candidates, requirements }`；隐私/范围/记忆/分诊/选择有专用工具，见各自描述。')
@@ -736,6 +766,26 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     },
   }), 'jev-kit report tool')
 
+  /* ── the last benchmark, on disk ────────────────────────────────────── */
+
+  const benchFile = path.join(ledgerDir, 'bench.json')
+
+  /** Remember what the last run measured, so the card can offer it without re-running. */
+  function saveBenchRecord (engines: string[], fixtures: number, details: ThresholdFit[], table: Record<string, number>): void {
+    try {
+      fs.mkdirSync(ledgerDir, { recursive: true })
+      const record: BenchRecord = { at: Date.now(), fixtures, engines, thresholds: table, details, hashes: questionHashes() }
+      fs.writeFileSync(benchFile, JSON.stringify(record, null, 2), { mode: 0o600 })
+    } catch { /* a missing record only costs the card one table */ }
+  }
+
+  function loadBenchRecord (): BenchRecord | undefined {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(benchFile, 'utf8')) as BenchRecord
+      return parsed && typeof parsed === 'object' ? parsed : undefined
+    } catch { return undefined }
+  }
+
   /* ── settings + status over HTTP (for a card, and for curl) ─────────── */
 
   function installApi (host: KitContext): void {
@@ -809,6 +859,23 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
                 send(res, 200, { ok: true, settings: { enabled: config.enabled, maxItems: config.maxItems, requestTimeoutMs: config.requestTimeoutMs, callBudgetMs: config.callBudgetMs, concurrency: config.concurrency, cacheTtlMs: config.cacheTtlMs, thresholds: thresholdOverrides() } })
                 return
               }
+              if (req.method === 'POST' && route === 'scan-staged') {
+                /*
+                 * "Scan my staged changes" for a caller that cannot run git (the
+                 * card, a browser). The slash command does the same thing in-process;
+                 * this exists so the button and the command share one behaviour.
+                 */
+                const body = await readBody(req) as { repo?: string }
+                const repo = typeof body?.repo === 'string' && body.repo ? body.repo : process.cwd()
+                const { diff, error } = await gitDiff(repo, true)
+                if (error) { send(res, 200, { ok: false, error: `读不到 ${repo} 的暂存改动：${error}` }); return }
+                if (!diff.trim()) { send(res, 200, { ok: true, units: 0, flagged: 0, findings: [], markdown: `${repo} 的暂存区是空的。` }); return }
+                const units = unitsOf(diff, config.maxItems)
+                const result = await runUnits('private_scan', units, 'card')
+                const findings = result.items.filter(item => item.verdict.level === 'flag').map(item => ({ where: item.where, headline: item.verdict.headline, values: item.verdict.values }))
+                send(res, 200, { ok: true, repo, units: result.items.length, flagged: findings.length, findings, markdown: renderCall(result) })
+                return
+              }
               if (req.method === 'POST' && route === 'scan-private') {
                 /*
                  * The privacy channel reachable from a shell, because a pre-push
@@ -846,7 +913,7 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
                  * route a shell can call in the background — a long tool call would
                  * block the very turn that is waiting for the answer.
                  */
-                const body = await readBody(req) as { engines?: string[], stateChars?: number, verbose?: boolean }
+                const body = await readBody(req) as { engines?: string[], stateChars?: number, verbose?: boolean, check?: boolean, floor?: number }
                 const known = knownEngines()
                 const wanted = Array.isArray(body?.engines) ? body.engines.filter((x): x is string => typeof x === 'string') : config.engines
                 const { engines } = selectEngines(wanted, known)
@@ -856,9 +923,24 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
                   reports.push(summarizeEngine(engine.id, engine.label, FIXTURES, trials, percentiles))
                 }
                 append(ledgerDir, { t: Date.now(), kind: 'bench', engines: engines.map(engine => engine.id), fixtures: FIXTURES.length })
-                const table = fittedTable(reports.flatMap(report => report.thresholds))
+                const details = reports.flatMap(report => report.thresholds)
+                const table = fittedTable(details)
+                saveBenchRecord(engines.map(engine => engine.id), FIXTURES.length, details, table)
+                /*
+                 * `check: true` turns the run into a gate for CI: every channel with
+                 * enough fixtures must clear a separation floor, and channels whose
+                 * wording moved since the recorded fit are named. Wording *is* the
+                 * calibration — this is the only thing that would have caught the
+                 * polarity inversion and the reworded channel automatically.
+                 */
+                const floor = typeof body?.floor === 'number' ? body.floor : 0.75
+                const failures = reports.flatMap(report => report.byChannel
+                  .filter(row => row.n >= 10 && row.separation !== undefined && row.separation < floor)
+                  .map(row => ({ engine: report.engine, channel: row.channel, separation: row.separation, floor })))
+                const drift = wordingDrift(loadBenchRecord())
                 send(res, 200, {
-                  ok: true,
+                  ok: failures.length === 0,
+                  check: body?.check === true ? { passed: failures.length === 0, failures, wordingDrift: drift, floor } : undefined,
                   fixtures: FIXTURES.length,
                   markdown: renderBench(reports, FIXTURES, body?.verbose === true),
                   // Apply-ready: POST this back to /config under `thresholds`.
@@ -869,6 +951,24 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
               if (req.method === 'POST' && route === 'heal-client') {
                 const cleared = healClientMeta(ctx)
                 send(res, 200, { ok: true, cleared, note: cleared ? '已清理，下一次注入即可见' : '没有需要清理的条目' })
+                return
+              }
+              if (req.method === 'GET' && route === 'thresholds') {
+                /*
+                 * What the card offers to apply, plus what is in force and whether the
+                 * wording moved since the fit: a threshold measured against different
+                 * questions is not a threshold for these questions.
+                 */
+                const record = loadBenchRecord()
+                send(res, 200, {
+                  ok: true,
+                  applied: thresholdOverrides(),
+                  suggested: record?.thresholds ?? {},
+                  details: record?.details ?? [],
+                  at: record?.at ?? null,
+                  fixtures: record?.fixtures ?? 0,
+                  wordingDrift: wordingDrift(record),
+                })
                 return
               }
               if (req.method === 'GET' && route === 'channels') {
@@ -891,12 +991,36 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     ctx.inject?.(['commands'], (scope: KitContext) => {
       scope.effect(() => scope.commands?.register({
         name: 'jev-kit',
-        description: 'Jev 决策工具箱：channels / report [days] / status',
-        input: { hint: 'channels | report [days] | status' },
-        handler: (invocation: { rawInput: string }) => {
-          const [, sub, arg] = invocation.rawInput.trim().split(/\s+/)
+        description: 'Jev 决策工具箱：scan [路径] / scope <任务> / report [days] / channels / status',
+        input: { hint: 'scan [repo] | scope <task> | report [days] | channels | status' },
+        handler: async (invocation: { rawInput: string, cwd?: string }) => {
+          const raw = invocation.rawInput.trim()
+          const [sub = '', ...rest] = raw.split(/\s+/)
+          const repo = invocation.cwd ?? process.cwd()
+          /*
+           * `scan` and `scope` exist because a tool only fires when a model remembers
+           * to call it — measured: the privacy channel ran twice in an entire session,
+           * and nobody remembers at push time. One command, no diff to paste.
+           */
+          if (sub === 'scan') {
+            const target = rest[0] && !rest[0].startsWith('-') ? rest[0] : repo
+            const { diff, error } = await gitDiff(target, true)
+            if (error) return { kind: 'error' as const, text: `读不到 ${target} 的暂存改动：${error}` }
+            if (!diff.trim()) return { kind: 'success' as const, text: `${target} 的暂存区是空的（先 git add；未暂存改动用 git diff 查看）。` }
+            const result = await runUnits('private_scan', unitsOf(diff, config.maxItems), 'command')
+            return { kind: 'success' as const, text: `**暂存改动扫描**（${target}）\n\n${renderCall(result)}` }
+          }
+          if (sub === 'scope') {
+            const task = rest.join(' ').trim()
+            if (!task) return { kind: 'error' as const, text: '用法：/jev-kit scope <任务描述> —— 对暂存区每个 hunk 判断是否属于该任务' }
+            const { diff, error } = await gitDiff(repo, true)
+            if (error) return { kind: 'error' as const, text: `读不到暂存改动：${error}` }
+            if (!diff.trim()) return { kind: 'success' as const, text: '暂存区是空的。' }
+            const result = await runUnits('scope_check', hunksOf(diff, config.maxItems), 'command', { task })
+            return { kind: 'success' as const, text: `**改动范围核对**（任务：${task}）\n\n${renderCall(result)}` }
+          }
           if (sub === 'report') {
-            const days = Math.max(1, Math.min(90, Number(arg) || 7))
+            const days = Math.max(1, Math.min(90, Number(rest[0]) || 7))
             return { kind: 'success' as const, text: render(summarize(load(ledgerDir, days), days)) }
           }
           if (sub === 'channels') {
@@ -909,7 +1033,7 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
             text: [
               `dsh-jev-kit v${VERSION} · enabled=${config.enabled} · key=${keyState.source} · 通道 ${CHANNEL_LIST.length}`,
               `ledger ${ledgerDir}`,
-              '用法：/jev-kit channels · /jev-kit report [days] · /jev-kit status',
+              '用法：/jev-kit scan [路径] · /jev-kit scope <任务> · /jev-kit report [days] · /jev-kit channels',
             ].join('\n'),
           }
         },

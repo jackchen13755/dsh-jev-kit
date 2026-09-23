@@ -90,6 +90,15 @@ test('the card renders its controls and its empty state', async () => {
   assert.match(text, /还没有判定记录/)
   // The catalogue is present as a details section, not as 23 lines of noise.
   assert.equal(find(tree, (node) => node.type === 'details').length, 1)
+  /*
+   * Every action the host supports must be reachable from the card. This assertion
+   * exists because a string patch once landed a *label* without its checkbox: the
+   * suite stayed green, the UI silently lacked the control, and only a screenshot
+   * caught it.
+   */
+  assert.ok(buttons.includes('扫描暂存改动'), 'the staged-diff scan is one click, not one remembered tool call')
+  assert.ok(find(tree, (node) => node.type === 'button').length >= 6, 'scan + save + test + refresh + copy + apply')
+  assert.match(text, /阈值（语料拟合）/, 'the fitted-threshold section renders')
 })
 
 test('the colour rule retires silent channels and never greens an unmeasured one', async () => {

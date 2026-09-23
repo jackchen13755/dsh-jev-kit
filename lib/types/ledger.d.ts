@@ -10,6 +10,8 @@ export type LedgerRecord = {
     via?: 'jev' | 'cache';
     chars: number;
     item?: number;
+    /** Wording fingerprint of the channel at decision time (drift detection). */
+    qh?: string;
     /** Set when the caller reported whether it acted on the advice. */
     acted?: boolean;
 } | {
@@ -86,6 +88,14 @@ export interface KitReport {
             pass: number;
         }>;
     };
+    /**
+     * Channels never used for real work.
+     *
+     * The corpus proves a channel *can* judge; only usage proves anyone wants it.
+     * Measured 2026-09-23: 16 of 23 channels had never been called outside the
+     * benchmark — the report should say so rather than implying they are in service.
+     */
+    unusedChannels: string[];
 }
 /** Aggregate the ledger by channel — the only honest way to rank this catalogue. */
 export declare function summarize(records: LedgerRecord[], days: number, usdPerMTok?: number): KitReport;
