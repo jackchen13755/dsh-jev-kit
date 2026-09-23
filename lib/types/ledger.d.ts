@@ -14,6 +14,22 @@ export type LedgerRecord = {
     acted?: boolean;
 } | {
     t: number;
+    kind: 'trial';
+    engine: string;
+    channel: string;
+    fixture: string;
+    ok: boolean;
+    value?: number | string;
+    level?: string;
+    ms?: number;
+    error?: string;
+} | {
+    t: number;
+    kind: 'bench';
+    engines: string[];
+    fixtures: number;
+} | {
+    t: number;
     kind: 'degraded';
     channel: string;
     reason: string;
@@ -61,6 +77,14 @@ export interface KitReport {
     health: {
         degraded: number;
         errors: number;
+    };
+    /** Benchmark trials, grouped by engine — the evidence for moving a channel. */
+    bench: {
+        trials: number;
+        byEngine: Record<string, {
+            n: number;
+            pass: number;
+        }>;
     };
 }
 /** Aggregate the ledger by channel — the only honest way to rank this catalogue. */

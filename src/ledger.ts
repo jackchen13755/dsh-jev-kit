@@ -21,6 +21,11 @@ export type LedgerRecord =
     /** Set when the caller reported whether it acted on the advice. */
     acted?: boolean
   }
+  | {
+    t: number; kind: 'trial'; engine: string; channel: string; fixture: string
+    ok: boolean; value?: number | string; level?: string; ms?: number; error?: string
+  }
+  | { t: number; kind: 'bench'; engines: string[]; fixtures: number }
   | { t: number; kind: 'degraded'; channel: string; reason: string }
   | { t: number; kind: 'error'; channel: string; message: string }
 
@@ -69,6 +74,8 @@ export interface KitReport {
   cost: { inputTokens: number; usd: number; savedCalls: number }
   channels: ChannelReport[]
   health: { degraded: number; errors: number }
+  /** Benchmark trials, grouped by engine — the evidence for moving a channel. */
+  bench: { trials: number; byEngine: Record<string, { n: number, pass: number }> }
 }
 
 const mean = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0)
@@ -107,6 +114,17 @@ export function summarize (records: LedgerRecord[], days: number, usdPerMTok = 0
       degraded: records.filter(r => r.kind === 'degraded').length,
       errors: records.filter(r => r.kind === 'error').length,
     },
+    bench: (() => {
+      const trials = records.filter((r): r is Extract<LedgerRecord, { kind: 'trial' }> => r.kind === 'trial')
+      const byEngine: Record<string, { n: number, pass: number }> = {}
+      for (const trial of trials) {
+        const own = byEngine[trial.engine] ?? { n: 0, pass: 0 }
+        own.n++
+        if (trial.ok) own.pass++
+        byEngine[trial.engine] = own
+      }
+      return { trials: trials.length, byEngine }
+    })(),
   }
 }
 

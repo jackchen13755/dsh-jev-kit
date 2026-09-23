@@ -57,6 +57,7 @@ dsh plugin --profile web add github:jackchen13755/dsh-jev-kit
 | `jev_kit_memory { mode: write\|conflict\|rerank }` | **优先事项 2** + 组 D |
 | `jev_kit_triage { kind: log\|alert\|bug\|flaky, items, context }` | 组 C：批量分诊 + 汇总 |
 | `jev_kit_pick { task, candidates, noun }` | 组 C：带 no-match 的选择 |
+| `jev_kit_bench { engines?, verbose? }` | **引擎对照测量**：夹具跑遍每个引擎，出分离度/达到真值/延迟 |
 | `jev_kit_status` / `jev_kit_report [days]` | 运行态 / 按通道的账本报告 |
 | `/jev-kit channels\|report\|status` | 同上，命令行 |
 
@@ -106,6 +107,40 @@ if (cached !== undefined) return cached   // null 也被缓存，并永久返回
 ```
 
 于是**先装 host 半边、后加浏览器半边的包，UI 永远不出现，且没有任何报错**（注入器只清自己那一条 pkgMeta，不管别人的）。kit 现在在 `apply()` 里清掉自己那条缓存（在引导图组合之前），并暴露 `POST /dsh-jev-kit/api/heal-client` 供随时修复。
+
+## 引擎对照测量（Jev vs 本地 Laya）
+
+"这条判断该不该搬到本地小模型"不能用模型卡来回答——两家**校准不同**（Laya 出厂过度自信、需按域拟合温度；Jev 的 p 是排序信号）。所以这里的**主指标是分离度**（阈值无关、跨引擎可比）：该判高的夹具是否真的排在该判低的之上；**阈值通过率只是次指标**。
+
+```bash
+# 只测 Jev（本机现状）
+jev_kit_bench { engines: ["jev"] }
+
+# 装上 Laya 后双跑（参考服务端已附）
+python3 -m venv .venv && . .venv/bin/activate && pip install laya
+python3 scripts/laya-server.py --port 8791
+jev_kit_bench { engines: ["jev", "laya"], verbose: true }
+```
+
+夹具 20 条，**真值由构造给定**（那段文本里确实有连接串凭据、那个 hunk 确实是顺手加的），真值**不会发给引擎**；引擎不可用时它的那一列是空的，**"没测出来"绝不等于"没问题"**，也不计入分母。
+
+### 基线（2026-09-22 本机实测，Jev 1.13.0）
+
+```
+20/20 达到真值 · p50 507ms · p95 973ms
+
+private_scan 3/3 分离度 1.00 · scope_check 2/2 1.00 · retry 2/2 1.00 · risk 2/2 1.00
+sufficient   2/2 1.00 · flaky 2/2 1.00 · memory_write 2/2 1.00
+failure_triage 1/1 · log_triage 2/2 · i18n_key 2/2   （分类题，按达到真值数比较）
+```
+
+Laya 那一列在装上之前是空的——这不是"略过"，是"未测量"。
+
+### 测量台第一次运行就抓到了一个真问题
+
+首轮 18/20：`sufficient` 两条报"未作答"。根因不是模型，而是**我的夹具用错了命名空间**——那条通道的问句键叫 `answers`，但它公开发布的判定字段叫 `covered`。于是分数读到一个"通道其实答得很好"的未作答。已修，并加了断言：**夹具声明的字段必须存在于该通道 `read()` 真正发布出来的 values 里**（用合成答案跑一遍 reader 来验证，不需要网络）。
+
+教训与问句那条同源：**名字必须指真实存在的东西**——问句要点真实字段，夹具要打真实发布字段。
 
 ## 预算与失败行为（与 lens 同一套纪律）
 
@@ -161,7 +196,7 @@ if (cached !== undefined) return cached   // null 也被缓存，并永久返回
 ```bash
 npm install          # 或 bash scripts/link-deps.sh（借用本机已有的 harness，不联网）
 npm run build        # tsc → lib/
-npm test             # 24 项离线测试：无网络、无 key、无宿主（含浏览器半边的桩渲染）
+npm test             # 31 项离线测试：无网络、无 key、无宿主（含浏览器半边桩渲染与夹具完整性）
 ```
 
 仓库提交了 `lib/`，所以 git 安装即使跳过构建也能直接用。
