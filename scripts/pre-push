@@ -116,6 +116,29 @@ payload=$(DIFF="$diff" python3 -c 'import json,os; print(json.dumps({"diff": os.
   exit 0
 }
 
+# ── 第一层：正则（形状） ───────────────────────────────────────────────
+#
+# Two layers, because they catch different things and the measurements said so:
+# a bare `db.acme-corp.internal` in a config file scored **0.29** on the model's
+# "does this reveal internal information?" question — it is a *shape*, and shapes are
+# what rules are for. A sentence like "服务 sgrl-billing-v2 部署在集群 acme-prod-2"
+# scored **0.88** — that is *meaning*, and it is what the model is for. Running only
+# the model missed the first; running only rules misses the second.
+token_hits=$(printf '%s' "$diff" | grep -nEi 'ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9]{20,}|sk_live_[A-Za-z0-9]{10,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|MIIE[A-Za-z0-9+/]{20,}|BEGIN [A-Z ]*PRIVATE KEY' | head -3 || true)
+path_hits=$(printf '%s' "$diff" | grep -nE '^\+.*/Users/[a-z][a-z0-9._-]+|^\+.*[A-Za-z0-9._-]+\.(internal|corp|intra)\b' | head -3 || true)
+if [ -n "$token_hits$path_hits" ]; then
+  echo "" >&2
+  echo "jev-kit pre-push: 正则层发现疑似凭据/内网形态（这一层不看语义，只看形状）：" >&2
+  [ -n "$token_hits" ] && printf '%s\n' "$token_hits" | sed 's/^/    token: /' >&2
+  [ -n "$path_hits" ] && printf '%s\n' "$path_hits" | sed 's/^/    path : /' >&2
+  echo "  这是形状匹配，请确认是否为夹具/文档示例。" >&2
+  if [ "${JEV_ALLOW_PUSH:-0}" != "1" ]; then
+    echo "  确认后重推：JEV_ALLOW_PUSH=1 git push" >&2
+    exit 1
+  fi
+fi
+
+# ── 第二层：模型（语义） ───────────────────────────────────────────────
 response=$(curl -sS -m 90 -X POST "$ENDPOINT" -H 'content-type: application/json' -d "$payload" 2>/dev/null)
 if [ -z "$response" ]; then
   echo "jev-kit pre-push: ⚠️ 扫描器不可达（$ENDPOINT）——本次不阻塞推送。" >&2

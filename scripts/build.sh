@@ -33,6 +33,17 @@ fi
 echo "=== typecheck + compile src → lib ($("$TSC" --version | awk '{print $2}')) ==="
 "$TSC" -p tsconfig.json
 
+# The emitted JS must at least parse.
+#
+# tsc passing is not the same guarantee, and today proved it three times: a patch
+# mangled a source line into `details: [...], \`…\`],`, the compile "succeeded"
+# because its output was redirected away, and the injector then refused to load the
+# plugin with "auto-reload precheck failed" — which names the wrong problem
+# entirely. A parse check here turns that into a build failure at the source.
+for file in lib/*.js; do
+  node --check "$file" || { echo "build: $file 无法解析——拒绝产出（见上面的语法错误）" >&2; exit 1; }
+done
+
 # The browser half is hand-written lazy-CJS (no tsdown, no bundler): the harness
 # only requires `__ModuleLoader__.load` plus an `inject` list, and the injector's
 # precheck looks for the built artifact at lib/client.js. So the client step is a
