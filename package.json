@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-jev-kit",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "description": "Jev decision toolkit for DeepSeek Harness: 21 named, typed judgments (privacy scan, change-scope, memory triage, batch log/bug/alert triage, agent-loop checks) built on one hardened, budgeted, ledger-backed transport. Advisory only — it never blocks.",
   "type": "module",
   "main": "./lib/index.js",

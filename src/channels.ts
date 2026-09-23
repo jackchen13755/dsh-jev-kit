@@ -153,9 +153,24 @@ export const CHANNELS: Record<string, ChannelSpec> = {
       secret: noul('Does `text` contain an actual credential or secret value — a password, API key, token, private key, or connection string with embedded credentials?',
         'a real secret value is present and would be usable if published',
         'no secret value is present; at most a placeholder, an env-var name, or documentation about secrets'),
-      personal: noul('Does `text` contain personal or identifying information about a real person — a home directory path, a personal email address, a phone number, a full name tied to an account, or an internal username?',
+      personal: noul('Does `text` contain personal or identifying information about a real person — a home directory path belonging to a person, a personal email address, a phone number, a full name tied to an account, or an internal username?',
         'personal or identifying information about a real person is present',
-        'no personal information; generic placeholders, and identity a project publishes on purpose (its own author/maintainer name, GitHub handle or users.noreply.github.com address in a manifest) do not count'),
+        /*
+         * The exclusion list is not decoration here either — it is the same lesson the
+         * `internal` axis learned first, applied one axis over.
+         *
+         * Measured 2026-09-23, before this text existed: the question named "a home
+         * directory path" as personal information, so a *tool's own* configuration path
+         * (`~/.dsh/profiles/web/node_modules`, `~/.dsh/.credentials.yaml`) scored 0.29–0.47,
+         * while the corpus's genuine personal positives score 0.52–0.97. The cut sat at
+         * 0.06, and ordinary comments and documentation prose — measured at 0.06–0.10 —
+         * were reported as personal data, blocking four pushes in a single day, each time
+         * on the author's own writing. Adding near-miss negatives to the corpus did not
+         * fix it (those score 0.00–0.47, still below the genuine positives), which is what
+         * pointed here: the model was reading its instructions correctly, and the
+         * instructions were wrong.
+         */
+        'no personal information; generic placeholders do not count, nor does identity a project publishes on purpose (its own author/maintainer name, GitHub handle or users.noreply.github.com address in a manifest) — and neither do paths, package names or identifiers belonging to the software being scanned itself (its own config, cache, profile and dependency directories, its own module or package names, and file paths inside the repository under review). Those name a program, not a person'),
       /*
        * The exclusion list is not decoration: the first real pre-push run flagged three
        * lines of ordinary TypeScript in this project as "internal information" because

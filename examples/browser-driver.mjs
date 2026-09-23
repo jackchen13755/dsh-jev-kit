@@ -3,7 +3,8 @@
  *
  *   node examples/browser-driver.mjs          # 需要 kit 在 3080、系统 Chrome 在位
  *
- * 页面默认取 /tmp/pick-demo/page.html；用 DEMO_PAGE=file:///... 换。
+ * 页面默认取同目录的 order-page.html（随仓库走，克隆下来即可跑）；用 DEMO_PAGE=file:///...
+ * 指向别的页面。
  *
  * 与"每步一次 LLM 回合"的关键区别：只有**两类岔口**问 Jev（页面状态、下一步点哪里），
  * 其余全部由代码与真实等待原语决定；且每个岔口只问一次。实测一遍约 3 次判定
@@ -12,12 +13,20 @@
  * 与"每步一次 LLM 回合"的关键区别：这里只有**两类岔口**问 Jev（页面状态、下一步点哪里），
  * 其余全部由代码与等待原语决定；且每个岔口只问一次。
  */
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 const require = createRequire('/usr/local/lib/node_modules/@playwright/cli/')
 const { chromium } = require('playwright-core')
 
 const KIT = 'http://127.0.0.1:3080/dsh-jev-kit/api/triage'
-const FILE = process.env.DEMO_PAGE ?? 'file:///tmp/pick-demo/page.html'
+/*
+ * The fixture page ships beside this script. It used to default to a /tmp path, which
+ * meant the "reproducible example" was reproducible only until the next reboot — and
+ * only on the machine that created it.
+ */
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const FILE = process.env.DEMO_PAGE ?? `file://${path.join(HERE, 'order-page.html')}`
 
 async function ask (channel, fields) {
   const res = await fetch(KIT, {

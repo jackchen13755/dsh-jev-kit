@@ -1,0 +1,17 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><title>订单列表</title>
+<style>body{font-family:system-ui;margin:24px}button,a{padding:8px 14px;margin:6px;font-size:14px}</style></head>
+<body>
+<h1>订单 #A-1029</h1>
+<p>金额 ¥128.00 · 状态 已支付</p>
+<div>
+  <button name="重新下单">重新下单</button>
+  <button name="申请退款">申请退款</button>
+  <a href="#help">帮助文档</a>
+  <button name="打印发票">打印发票</button>
+</div>
+<script>
+  for (const el of document.querySelectorAll('button,a')) {
+    el.addEventListener('click', () => { window.__clicked = (window.__clicked||[]).concat(el.getAttribute('name')||el.textContent) })
+  }
+</script>
+</body></html>

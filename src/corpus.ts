@@ -66,7 +66,39 @@ const INTERNAL_ELEMENTS = [
 ]
 
 /** Texts that are genuinely harmless: placeholders, env var *names*, docs. */
+/*
+ * Near-miss negatives.
+ *
+ * The original pool was "obviously clean": placeholders, env-var names, generic prose
+ * about build times. Measured against it, the personal axis had a *perfect* separation
+ * band [0.05, 0.52] — and the fitted cut landed at 0.06, the floor. Then real life
+ * broke it four times in one day: ordinary technical prose scored 0.06–0.10 and the
+ * pre-push gate flagged its own author's comments and README text as personal data.
+ *
+ * The corpus was not wrong about the model; it was wrong about the world. A negative
+ * set with no near-misses cannot price the boundary, so the fitter drives the cut to
+ * the bottom of the score range, where any unmodelled noise crosses it.
+ *
+ * These entries are the distribution that was missing: code comments, illustrative
+ * snippets, documentation prose — text that mentions paths, hosts and identifiers
+ * without being about a person. Composed, like everything here: each is harmless by
+ * construction, not by judgement.
+ */
+const NEAR_MISS_ELEMENTS = [
+  '// 这一行把 session 变量抽出来复用，避免重复表达式。',
+  'const risk = await ask(\'risk\', { task: TASK, text: `点击 ${target}` })',
+  '`private_scan.internal` 是按轴刀口；应用建议阈值时会保留它。',
+  '查看 ~/.dsh/profiles/web/node_modules 下的插件入口，重载后生效。',
+  '写入 DSH 凭据库（~/.dsh/.credentials.yaml，0600），lens 与 kit 共用同一把。',
+  'The host resolves that package at runtime; only the compiler needs its types.',
+  'diff --git a/src/index.ts b/src/index.ts — 路由按通道形态分流。',
+  'role=button name="提交订单"，页面 https://shop.example.com/checkout',
+  'Prefer the host verdict; recompute only when the payload has none.',
+  '把探索期与定型执行分开：场景一旦定型就固化成批处理脚本。',
+]
+
 const CLEAN_ELEMENTS = [
+  ...NEAR_MISS_ELEMENTS,
   'export TYPESAFE_API_KEY=<your-key-here>',
   'password: process.env.DB_PASSWORD',
   'os.environ["REDIS_URL"]',
@@ -107,7 +139,9 @@ function privacyFixtures (): Fixture[] {
       })
     }
   }
-  for (let i = 0; i < 15; i++) {
+  /* 25, not 15: the pool now carries near-misses, and every one of them has to be
+   * exercised or the fitter never sees the boundary it is being asked to price. */
+  for (let i = 0; i < 25; i++) {
     const body = `${pick(CLEAN_ELEMENTS, i)}\n\n${pick(CLEAN_ELEMENTS, i + 5)}`
     out.push({
       id: `priv_clean_${i}`,
