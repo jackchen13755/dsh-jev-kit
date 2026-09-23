@@ -57,7 +57,7 @@ export interface KitSettings {
   /**
    * Repository the card and `/jev-kit scan` read by default.
    *
-   * The host process's cwd is *not* the workspace (measured: `/Users/zhe.chen`),
+   * The host process's cwd is *not* the workspace (measured on this machine: the host's cwd was the user's home directory, not the workspace),
    * so "scan the staged diff" without a path fails with git's confusing
    * `--no-index` message. Naming the repo once removes the guesswork.
    */
