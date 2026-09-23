@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { FIXTURES, COMMAND_FIXTURES, separation, check, questionsFor, verdictFor, summarizeEngine, renderBench } from '../lib/bench.js'
+import { FIXTURES, COMMAND_FIXTURES, separation, check, questionsFor, verdictFor, summarizeEngine, renderBench, fitThresholds } from '../lib/bench.js'
 import { CHANNEL_LIST, channelOf } from '../lib/channels.js'
 import { selectEngines } from '../lib/engines.js'
 import { percentiles } from '../lib/resilience.js'
@@ -22,7 +22,8 @@ test('every fixture states its ground truth and names a real channel', () => {
   for (const fixture of FIXTURES) {
     // Either it names a real channel, or it brings its own questions (`-` + questions).
     assert.ok(channelOf(fixture.channel) || fixture.questions, `${fixture.id} must name a channel or supply its own questions`)
-    assert.ok(fixture.truth.length > 6, `${fixture.id} must state what is true about the input`)
+    // Short is fine ("删表" states the truth); empty or vague is not.
+    assert.ok(fixture.truth.trim().length >= 2, `${fixture.id} must state what is true about the input`)
     assert.ok(Object.keys(questionsFor(fixture).questions).length > 0, `${fixture.id} must produce at least one question`)
   }
   assert.ok(COMMAND_FIXTURES.length >= 10, 'the auto-channel wording needs a real command set')
@@ -116,6 +117,27 @@ test('an unreachable engine is reported as unavailable, not as passing', () => {
   assert.match(text, /不可用/)
   assert.match(text, /不计为通过/)
   assert.doesNotMatch(text, /\| .* \| 0\/0 \|/) // no fabricated per-channel rows
+})
+
+test('the corpus fits its own threshold when the hand-picked cut is in the wrong place', () => {
+  // Ordering is perfect, but every value sits far above the 0.5 cut assumed for
+  // "low" cases: the channel is not wrong, its threshold is.
+  const fixtures = [
+    ...[0.91, 0.88].map((_, i) => ({ id: `hi${i}`, channel: 'risk', truth: 't', expect: { kind: 'high', field: 'irreversible' }, state: {} })),
+    ...[0.72, 0.68, 0.61].map((_, i) => ({ id: `lo${i}`, channel: 'risk', truth: 't', expect: { kind: 'low', field: 'irreversible' }, state: {} })),
+  ]
+  const trials = [
+    ...[0.91, 0.88].map((value, i) => ({ fixture: `hi${i}`, channel: 'risk', engine: 'x', ok: value >= 0.5, value })),
+    ...[0.72, 0.68, 0.61].map((value, i) => ({ fixture: `lo${i}`, channel: 'risk', engine: 'x', ok: value < 0.5, value })),
+  ]
+  const [fit] = fitThresholds(fixtures, trials, { risk: 0.5 })
+  assert.equal(fit.current, 0.5)
+  assert.ok(fit.recommended > 0.72 && fit.recommended <= 0.88, `recommended cut between the groups, got ${fit.recommended}`)
+  assert.equal(fit.accuracyNow, 0.4, 'the assumed cut gets two of five right')
+  assert.equal(fit.accuracyFitted, 1, 'the fitted cut gets all five')
+  assert.equal(fit.changes, true)
+  // A channel with one side only cannot be fitted, and says nothing rather than guessing.
+  assert.deepEqual(fitThresholds([fixtures[0]], [trials[0]], { risk: 0.5 }), [])
 })
 
 test('an unknown engine id surfaces instead of being silently dropped', () => {

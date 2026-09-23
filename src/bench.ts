@@ -26,6 +26,7 @@
  * @module dsh-jev-kit/bench
  */
 import { channelOf, DEFAULT_THRESHOLDS, type ChannelState, type Verdict } from './channels.js'
+import { CORPUS } from './corpus.js'
 import type { JevAnswer, JevQuestion } from './jev.js'
 
 export type Expectation =
@@ -177,8 +178,13 @@ export const COMMAND_FIXTURES: Fixture[] = [
   command('cmd_grep', 'grep -rn "dictType" src/ | head -20', false, '纯只读检索，不写入任何文件'),
 ]
 
-/** Everything the benchmark runs: kit channels plus the lens's command wording. */
-export const FIXTURES: Fixture[] = [...CHANNEL_FIXTURES, ...COMMAND_FIXTURES]
+/**
+ * Everything the benchmark runs: the generated corpus (dozens of cases per
+ * channel, truth by construction) plus the original hand-written anchor set,
+ * which is kept because it was the first thing ever measured and a change in its
+ * numbers is a signal about the harness, not about a model.
+ */
+export const FIXTURES: Fixture[] = [...CHANNEL_FIXTURES, ...COMMAND_FIXTURES, ...CORPUS]
 
 /* ── scoring ─────────────────────────────────────────────────────────── */
 
@@ -226,6 +232,61 @@ export function check (fixture: Fixture, verdict: Verdict): { ok: boolean, value
   return { ok, value, why: ok ? undefined : `期望 ${fixture.expect.kind === 'high' ? '≥' : '<'} ${at}` }
 }
 
+/**
+ * The threshold a channel's own corpus says it should use.
+ *
+ * Separation being high while the pass rate is low is not a contradiction: it
+ * means the engine *orders* cases correctly but its probabilities do not sit where
+ * the hand-picked cut assumes. Jev documents its probability as a ranking signal
+ * rather than a probability, and a local model ships over-confident — so the cut
+ * belongs to the corpus, not to a guess. This is the empirical accuracy-maximising
+ * cut over every midpoint between observed values.
+ */
+export interface ThresholdFit {
+  channel: string
+  current: number
+  recommended: number
+  accuracyNow: number
+  accuracyFitted: number
+  n: number
+  /** True when the fitted cut actually changes a decision on this corpus. */
+  changes: boolean
+}
+
+/** Fit one cut per numeric channel from labelled values. */
+export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Record<string, number> = DEFAULT_THRESHOLDS): ThresholdFit[] {
+  const out: ThresholdFit[] = []
+  for (const channel of [...new Set(fixtures.map(fixture => fixture.channel))]) {
+    const pairs: Array<{ value: number, high: boolean }> = []
+    for (const fixture of fixtures.filter(item => item.channel === channel)) {
+      if (fixture.expect.kind === 'choice') continue
+      const row = trials.find(trial => trial.fixture === fixture.id && !trial.error)
+      if (typeof row?.value !== 'number') continue
+      pairs.push({ value: row.value, high: fixture.expect.kind === 'high' })
+    }
+    if (pairs.length < 4 || !pairs.some(pair => pair.high) || !pairs.some(pair => !pair.high)) continue
+    const accuracyAt = (cut: number): number => pairs.filter(pair => (pair.value >= cut) === pair.high).length / pairs.length
+    const values = [...new Set(pairs.map(pair => pair.value))].sort((a, b) => a - b)
+    const cuts = [0, ...values.flatMap((value, index) => index === 0 ? [value] : [(values[index - 1] as number + value) / 2]), 1]
+    let best = { cut: current[channel] ?? 0.5, accuracy: accuracyAt(current[channel] ?? 0.5) }
+    for (const cut of cuts) {
+      const accuracy = accuracyAt(cut)
+      if (accuracy > best.accuracy + 1e-9) best = { cut, accuracy }
+    }
+    const now = accuracyAt(current[channel] ?? 0.5)
+    out.push({
+      channel,
+      current: current[channel] ?? 0.5,
+      recommended: Number(best.cut.toFixed(2)),
+      accuracyNow: Number(now.toFixed(3)),
+      accuracyFitted: Number(best.accuracy.toFixed(3)),
+      n: pairs.length,
+      changes: Math.abs(best.cut - (current[channel] ?? 0.5)) > 0.01,
+    })
+  }
+  return out.sort((a, b) => (b.accuracyFitted - b.accuracyNow) - (a.accuracyFitted - a.accuracyNow))
+}
+
 export interface EngineReport {
   engine: string
   label: string
@@ -236,6 +297,8 @@ export interface EngineReport {
   total: number
   latency: { p50: number, p95: number }
   byChannel: Array<{ channel: string, n: number, pass: number, separation?: number, p50: number }>
+  /** Per-channel cut the corpus itself implies (see {@link fitThresholds}). */
+  thresholds: ThresholdFit[]
 }
 
 /** Summarise one engine's trials into the numbers the decision actually needs. */
@@ -274,6 +337,7 @@ export function summarizeEngine (engine: string, label: string, fixtures: Fixtur
     total: fixtures.length,
     latency: latencies.length ? percentile(latencies) : { p50: 0, p95: 0 },
     byChannel,
+    thresholds: fitThresholds(fixtures, trials),
   }
 }
 
@@ -294,7 +358,14 @@ export function renderBench (reports: EngineReport[], fixtures: Fixture[], verbo
     for (const row of report.byChannel) {
       lines.push(`| ${row.channel} | ${row.n} | ${row.pass}/${row.n} | ${row.separation === undefined ? '—（需一高一低两条夹具）' : row.separation.toFixed(2)} | ${row.p50}ms |`)
     }
-    lines.push('')
+    const adjustable = report.thresholds.filter(fit => fit.changes && fit.accuracyFitted > fit.accuracyNow + 0.02)
+    if (adjustable.length) {
+      lines.push('阈值建议（**这些通道不是判错，是刀口位置不对**：分离度好而通过率低 = 排序对、概率刻度不对）', '', '| 通道 | 现值 | 语料拟合值 | 通过率 | 拟合后 | n |', '|---|---|---|---|---|---|')
+      for (const fit of adjustable) {
+        lines.push(`| ${fit.channel} | ${fit.current.toFixed(2)} | **${fit.recommended.toFixed(2)}** | ${(fit.accuracyNow * 100).toFixed(0)}% | **${(fit.accuracyFitted * 100).toFixed(0)}%** | ${fit.n} |`)
+      }
+      lines.push('')
+    }
   }
 
   const usable = reports.filter(report => report.status === 'ok')

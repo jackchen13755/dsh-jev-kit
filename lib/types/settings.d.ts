@@ -23,6 +23,14 @@ export interface KitSettings {
     dailyCallLimit: number;
     /** Extra redaction patterns applied before anything leaves the machine. */
     redactExtra: string[];
+    /**
+     * Per-string cap applied to states sent to a *local* engine, in characters
+     * (0 disables). Hosted engines keep the full state: their cost is not per token
+     * in the same way, and truncation there would lose information for nothing.
+     */
+    localStateChars: number;
+    /** Cap on array fields (candidate lists, requirement lists) for local engines. */
+    localMaxItems: number;
 }
 export declare const KIT_DEFAULTS: KitSettings;
 /** Validate a settings object, naming the field and its range. */

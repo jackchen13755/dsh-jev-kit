@@ -105,6 +105,42 @@ export function layaEngine (options: { endpoint: string }): Engine {
 }
 
 /**
+ * Shrink a state to what a local engine can afford to read.
+ *
+ * Measured on an M2 with the ONNX English checkpoint: a 22-character state costs
+ * ~100 ms while a 743-character one costs ~1.6 s, because a bidirectional encoder
+ * re-reads the whole sequence on every call — there is no KV cache to warm, and
+ * the vendor's 33 ms figure is a T4 GPU. Token count is therefore the first-order
+ * cost of a local engine, and this is where a deployment controls it.
+ *
+ * Truncation is marked, never silent: the model is told the text was cut, so a
+ * "no" on a truncated state is distinguishable from a "no" on the whole of it.
+ *
+ * @param state - the payload as the channel built it.
+ * @param limits - `maxChars` per string (0 disables), `maxItems` per array.
+ * @returns a trimmed copy plus how many fields were cut.
+ */
+export function trimState (state: Record<string, unknown>, limits: { maxChars: number, maxItems: number }): { state: Record<string, unknown>, trimmed: number } {
+  if (limits.maxChars <= 0 && limits.maxItems <= 0) return { state, trimmed: 0 }
+  let trimmed = 0
+  const cut = (value: string): string => {
+    if (limits.maxChars <= 0 || value.length <= limits.maxChars) return value
+    trimmed++
+    return `${value.slice(0, limits.maxChars)}…[truncated ${value.length - limits.maxChars} chars]`
+  }
+  const out: Record<string, unknown> = {}
+  for (const [field, value] of Object.entries(state)) {
+    if (typeof value === 'string') out[field] = cut(value)
+    else if (Array.isArray(value)) {
+      const kept = limits.maxItems > 0 ? value.slice(0, limits.maxItems) : value
+      if (kept.length !== value.length) trimmed++
+      out[field] = kept.map(item => (typeof item === 'string' ? cut(item) : item))
+    } else out[field] = value
+  }
+  return { state: out, trimmed }
+}
+
+/**
  * Look up the engines named in settings, preserving the requested order.
  *
  * Returns unknown ids alongside the known ones so a typo in settings surfaces as

@@ -63,7 +63,12 @@ export interface Fixture {
     read?: (answers: Record<string, JevAnswer>) => Verdict;
 }
 export declare const COMMAND_FIXTURES: Fixture[];
-/** Everything the benchmark runs: kit channels plus the lens's command wording. */
+/**
+ * Everything the benchmark runs: the generated corpus (dozens of cases per
+ * channel, truth by construction) plus the original hand-written anchor set,
+ * which is kept because it was the first thing ever measured and a change in its
+ * numbers is a signal about the harness, not about a model.
+ */
 export declare const FIXTURES: Fixture[];
 export interface Trial {
     fixture: string;
@@ -93,6 +98,28 @@ export declare function check(fixture: Fixture, verdict: Verdict): {
     value?: number | string;
     why?: string;
 };
+/**
+ * The threshold a channel's own corpus says it should use.
+ *
+ * Separation being high while the pass rate is low is not a contradiction: it
+ * means the engine *orders* cases correctly but its probabilities do not sit where
+ * the hand-picked cut assumes. Jev documents its probability as a ranking signal
+ * rather than a probability, and a local model ships over-confident — so the cut
+ * belongs to the corpus, not to a guess. This is the empirical accuracy-maximising
+ * cut over every midpoint between observed values.
+ */
+export interface ThresholdFit {
+    channel: string;
+    current: number;
+    recommended: number;
+    accuracyNow: number;
+    accuracyFitted: number;
+    n: number;
+    /** True when the fitted cut actually changes a decision on this corpus. */
+    changes: boolean;
+}
+/** Fit one cut per numeric channel from labelled values. */
+export declare function fitThresholds(fixtures: Fixture[], trials: Trial[], current?: Record<string, number>): ThresholdFit[];
 export interface EngineReport {
     engine: string;
     label: string;
@@ -112,6 +139,8 @@ export interface EngineReport {
         separation?: number;
         p50: number;
     }>;
+    /** Per-channel cut the corpus itself implies (see {@link fitThresholds}). */
+    thresholds: ThresholdFit[];
 }
 /** Summarise one engine's trials into the numbers the decision actually needs. */
 export declare function summarizeEngine(engine: string, label: string, fixtures: Fixture[], trials: Trial[], percentile: (values: number[]) => {

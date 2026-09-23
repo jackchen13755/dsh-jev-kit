@@ -37,6 +37,14 @@ export interface KitSettings {
   dailyCallLimit: number
   /** Extra redaction patterns applied before anything leaves the machine. */
   redactExtra: string[]
+  /**
+   * Per-string cap applied to states sent to a *local* engine, in characters
+   * (0 disables). Hosted engines keep the full state: their cost is not per token
+   * in the same way, and truncation there would lose information for nothing.
+   */
+  localStateChars: number
+  /** Cap on array fields (candidate lists, requirement lists) for local engines. */
+  localMaxItems: number
 }
 
 export const KIT_DEFAULTS: KitSettings = {
@@ -53,6 +61,8 @@ export const KIT_DEFAULTS: KitSettings = {
   sessionCallLimit: 2000,
   dailyCallLimit: 20_000,
   redactExtra: [],
+  localStateChars: 600,
+  localMaxItems: 12,
 }
 
 const BOUNDS: Record<string, [number, number]> = {
@@ -66,6 +76,8 @@ const BOUNDS: Record<string, [number, number]> = {
   breakerCooldownMs: [0, 3_600_000],
   sessionCallLimit: [0, 1_000_000],
   dailyCallLimit: [0, 10_000_000],
+  localStateChars: [0, 8000],
+  localMaxItems: [0, 200],
 }
 
 /** Validate a settings object, naming the field and its range. */

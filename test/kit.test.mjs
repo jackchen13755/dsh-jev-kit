@@ -17,6 +17,7 @@ import { CHANNELS, CHANNEL_LIST, channelOf, DEFAULT_THRESHOLDS } from '../lib/ch
 import { isDiff, diffUnits, textUnits, hunksOf, unitsOf } from '../lib/segments.js'
 import { append, load, summarize, render } from '../lib/ledger.js'
 import { KIT_DEFAULTS, merge, validate, loadStored, saveStored } from '../lib/settings.js'
+import { trimState } from '../lib/engines.js'
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'jev-kit-'))
 
@@ -156,6 +157,19 @@ test('i18n_key prefers reusing an existing key over adding a synonym', () => {
   const off = CHANNELS.i18n_key.read(answer({ reuse: 'none', consistent: 0.2 }), state)
   assert.equal(off.level, 'warn')
   assert.match(off.headline, /术语/)
+})
+
+test('state trimming caps tokens, marks the cut, and leaves short states alone', () => {
+  const long = 'x'.repeat(1000)
+  const trimmed = trimState({ text: long, task: 'short', candidates: ['a', 'b', 'c', 'd'], nested: 7 }, { maxChars: 100, maxItems: 2 })
+  assert.match(String(trimmed.state.text), /^x{100}…\[truncated 900 chars\]$/, 'the cut is announced, not silent')
+  assert.equal(trimmed.state.task, 'short', 'short values are untouched')
+  assert.deepEqual(trimmed.state.candidates, ['a', 'b'], 'arrays are capped')
+  assert.equal(trimmed.state.nested, 7)
+  assert.ok(trimmed.trimmed >= 2)
+  // 0 disables both limits, and an untouched state is returned as-is.
+  assert.equal(trimState({ text: long }, { maxChars: 0, maxItems: 0 }).trimmed, 0)
+  assert.equal(trimState({ text: long }, { maxChars: 0, maxItems: 0 }).state.text, long)
 })
 
 /* ── splitters ───────────────────────────────────────────────────────── */

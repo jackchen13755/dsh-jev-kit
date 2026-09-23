@@ -27,6 +27,12 @@ for (let i = 2; i < process.argv.length; i += 2) args.set(process.argv[i].replac
 const PORT = Number(args.get('port') ?? process.env.LAYA_PORT ?? 8791)
 const SUBFOLDER = args.get('subfolder') ?? process.env.LAYA_SUBFOLDER ?? 'english'
 const VERBOSE = args.has('verbose') || process.env.LAYA_VERBOSE === '1'
+/*
+ * Measured on an M2 (8 cores: 4 performance + 4 efficiency) with a 743-char state:
+ * default threads 1644ms, intraOp=4 1535ms, intraOp=8 2046ms. The efficiency cores
+ * make it *slower*, so the default here is the performance-core count.
+ */
+const THREADS = Number(args.get('threads') ?? process.env.LAYA_THREADS ?? 4)
 
 /**
  * The kit's question schema → Laya's.
@@ -123,7 +129,10 @@ let model = null
 
 console.log(`[laya] loading checkpoint "${SUBFOLDER}" (first run downloads ~1.7 GB to ~/.cache/receptron-laya)…`)
 const startedAt = Date.now()
-laya = await Laya.load({ subfolder: SUBFOLDER === 'english' ? undefined : SUBFOLDER })
+laya = await Laya.load({
+  subfolder: SUBFOLDER === 'english' ? undefined : SUBFOLDER,
+  ...(THREADS > 0 ? { sessionOptions: { intraOpNumThreads: THREADS } } : {}),
+})
 model = laya
 console.log(`[laya] model ready in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`)
 
@@ -138,7 +147,7 @@ try {
 }
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`[laya] listening on http://127.0.0.1:${PORT} · subfolder=${SUBFOLDER}`)
+  console.log(`[laya] listening on http://127.0.0.1:${PORT} · subfolder=${SUBFOLDER} · intraOpNumThreads=${THREADS}`)
   console.log('[laya] kit setting: engines = ["jev", "laya"] · layaEndpoint = http://127.0.0.1:' + PORT)
 })
 

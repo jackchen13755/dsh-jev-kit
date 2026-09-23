@@ -30,8 +30,8 @@ import { createCache, keyOf } from './cache.js'
 import { serviceOf, type CredentialsService, type Logger, type WebRequestLike, type WebResponseLike, type WebServerLike } from './host.js'
 import { CHANNEL_LIST, channelOf, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
 import { hunksOf, unitsOf, type Unit } from './segments.js'
-import { jevEngine, layaEngine, selectEngines, type Engine } from './engines.js'
-import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, type Trial } from './bench.js'
+import { jevEngine, layaEngine, selectEngines, trimState, type Engine } from './engines.js'
+import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, type Fixture, type Trial } from './bench.js'
 import { append, load, render, summarize, type LedgerRecord } from './ledger.js'
 import { KIT_DEFAULTS, loadStored, merge, saveStored, validate, type KitSettings } from './settings.js'
 
@@ -286,10 +286,18 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     }
     if (channelState.candidates) redacted.candidates = channelState.candidates.map(candidate => prep(candidate))
     if (channelState.requirements) redacted.requirements = channelState.requirements.map(requirement => prep(requirement))
+    /*
+     * A local engine pays per token (measured: 22 chars ≈ 100 ms, 743 chars ≈ 1.6 s),
+     * so its state is capped. The hosted engine keeps everything: truncating there
+     * would trade information for a cost it does not have.
+     */
+    const payload = engine.id === 'jev'
+      ? redacted
+      : trimState(redacted, { maxChars: config.localStateChars, maxItems: config.localMaxItems }).state
 
     let answer
     try {
-      answer = await limiter.run(() => engine.ask(redacted, questions, { timeoutMs: config.requestTimeoutMs }))
+      answer = await limiter.run(() => engine.ask(payload, questions, { timeoutMs: config.requestTimeoutMs }))
     } catch (error) {
       noteAuthFailure(error)
       breaker.fail()
@@ -611,50 +619,78 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     },
   }), 'jev-kit pick tool')
 
+  /**
+   * Run the whole fixture suite through one engine.
+   *
+   * Shared by the tool and the HTTP route so both measure the same thing; bounded
+   * concurrency because a few hundred fixtures at ~1s each would otherwise take
+   * minutes per engine, and the limiter is the same ceiling the interactive path
+   * respects.
+   *
+   * @param engine - the engine under test.
+   * @param stateChars - per-string cap for this run (0 = full state).
+   * @returns one trial per fixture, in suite order.
+   */
+  async function runSuite (engine: Engine, stateChars: number): Promise<Trial[]> {
+    let reachable = true
+    try {
+      reachable = await engine.available()
+    } catch { reachable = false }
+    if (!reachable) {
+      append(ledgerDir, { t: Date.now(), kind: 'trial', engine: engine.id, channel: '-', fixture: '(probe)', ok: false, error: 'unavailable' })
+      return [{ fixture: '(probe)', channel: '-', engine: engine.id, ok: false, error: `unavailable: ${engine.label}` }]
+    }
+    const judged: Trial[] = new Array(FIXTURES.length)
+    let cursor = 0
+    const workers = Array.from({ length: Math.max(1, Math.min(config.concurrency, FIXTURES.length)) }, async () => {
+      while (cursor < FIXTURES.length) {
+        const index = cursor++
+        const fixture = FIXTURES[index] as Fixture
+        let trial: Trial = { fixture: fixture.id, channel: fixture.channel, engine: engine.id, ok: false }
+        try {
+          const { questions, state } = questionsFor(fixture)
+          const payload = stateChars > 0
+            ? trimState(state as Record<string, unknown>, { maxChars: stateChars, maxItems: config.localMaxItems }).state
+            : (state as Record<string, unknown>)
+          const answer = await engine.ask(payload, questions, { timeoutMs: config.requestTimeoutMs })
+          const verdict = verdictFor(fixture, answer.answers)
+          const result = check(fixture, verdict)
+          trial = { ...trial, ok: result.ok, value: result.value, why: result.why, level: verdict.level, ms: answer.ms }
+        } catch (error) {
+          trial = { ...trial, error: error instanceof Error ? error.message : String(error) }
+        }
+        judged[index] = trial
+        append(ledgerDir, { t: Date.now(), kind: 'trial', engine: engine.id, channel: fixture.channel, fixture: fixture.id, ok: trial.ok, value: trial.value, level: trial.level, ms: trial.ms, error: trial.error })
+      }
+    })
+    await Promise.all(workers)
+    return judged.filter(Boolean)
+  }
+
   tool(defineTool({
     name: 'jev_kit_bench',
-    description: 'Run the labelled fixture suite through every configured engine and compare. Primary metric is separation (threshold-free, comparable across engines); the thresholded pass rate is secondary, because the engines are calibrated differently. An unreachable engine is reported as unavailable — never counted as passing.',
+    description: `Run the ${FIXTURES.length}-fixture suite (dozens per channel, truth by construction) through every configured engine. Primary metric is separation (threshold-free, comparable across engines); the thresholded pass rate is secondary. An unreachable engine reports unavailable — never counted as passing. For the full corpus prefer POST /dsh-jev-kit/api/bench in a background shell: it takes minutes.`,
     parameters: {
       engines: { type: 'array', items: { type: 'string' }, description: 'Engine ids to compare (default: the ones in settings)' },
       verbose: { type: 'boolean', description: 'Also list every fixture with its ground truth' },
+      stateChars: { type: 'number', description: 'Cap each state string at N chars for this run (0 = full state). Use it to measure the local-engine tradeoff.' },
     },
     output: textOut,
-    async execute (args: { engines?: string[], verbose?: boolean }) {
+    async execute (args: { engines?: string[], verbose?: boolean, stateChars?: number }) {
       const wanted = list(args?.engines)
       const known = knownEngines()
       const { engines, unknown } = selectEngines(wanted.length ? wanted : config.engines, known)
       if (!engines.length) return `没有可用引擎。已知：${known.map(engine => engine.id).join(', ')}${unknown.length ? ` · 未知：${unknown.join(', ')}` : ''}`
       const reports = []
       for (const engine of engines) {
-        const trials: Trial[] = []
-        let reachable = true
-        try {
-          reachable = await engine.available()
-        } catch { reachable = false }
-        if (!reachable) {
-          trials.push({ fixture: '(probe)', channel: '-', engine: engine.id, ok: false, error: `unavailable: ${engine.label}` })
-          reports.push(summarizeEngine(engine.id, engine.label, FIXTURES, trials, percentiles))
-          append(ledgerDir, { t: Date.now(), kind: 'trial', engine: engine.id, channel: '-', fixture: '(probe)', ok: false, error: 'unavailable' })
-          continue
-        }
-        for (const fixture of FIXTURES) {
-          let trial: Trial = { fixture: fixture.id, channel: fixture.channel, engine: engine.id, ok: false }
-          try {
-            const { questions, state } = questionsFor(fixture)
-            const answer = await engine.ask(state as Record<string, unknown>, questions, { timeoutMs: config.requestTimeoutMs })
-            const verdict = verdictFor(fixture, answer.answers)
-            const result = check(fixture, verdict)
-            trial = { ...trial, ok: result.ok, value: result.value, why: result.why, level: verdict.level, ms: answer.ms }
-          } catch (error) {
-            trial = { ...trial, error: error instanceof Error ? error.message : String(error) }
-          }
-          trials.push(trial)
-          append(ledgerDir, { t: Date.now(), kind: 'trial', engine: engine.id, channel: fixture.channel, fixture: fixture.id, ok: trial.ok, value: trial.value, level: trial.level, ms: trial.ms, error: trial.error })
-        }
+        const trials = await runSuite(engine, typeof args?.stateChars === 'number' ? Math.max(0, args.stateChars) : 0)
         reports.push(summarizeEngine(engine.id, engine.label, FIXTURES, trials, percentiles))
       }
       append(ledgerDir, { t: Date.now(), kind: 'bench', engines: engines.map(engine => engine.id), fixtures: FIXTURES.length })
-      return renderBench(reports, FIXTURES, args?.verbose === true) + (unknown.length ? `\n\n⚠️ 设置里有未知引擎 id：${unknown.join(', ')}（已忽略，没有静默当成可用）` : '')
+      const capNote = typeof args?.stateChars === 'number' && args.stateChars > 0
+        ? `\n\n> 本轮把每个 state 截到 **${args.stateChars} 字符**（本地引擎的成本随 token 走，截断即为部署配置）。两列都被同样截断，所以可比，但都不同于"全长 state"的结论。`
+        : ''
+      return renderBench(reports, FIXTURES, args?.verbose === true) + capNote + (unknown.length ? `\n\n⚠️ 设置里有未知引擎 id：${unknown.join(', ')}（已忽略，没有静默当成可用）` : '')
     },
   }), 'jev-kit bench tool')
 
@@ -674,6 +710,7 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
         policy,
         `key=${keyState.source}${keyState.value ? '' : '  ⚠️ 未解析到 key：所有判断都会被跳过（fail-open）'}`,
         `引擎 ${config.engines.join(' → ')} · 本地端点 ${config.layaEndpoint || '（未配置）'}`,
+        `本地引擎限流 state ${config.localStateChars} 字符 / 数组 ${config.localMaxItems} 项`,
         `超时 单次 ${config.requestTimeoutMs}ms · 单次调用预算 ${config.callBudgetMs}ms · 每次最多 ${config.maxItems} 条 · 并发 ${config.concurrency}`,
         `预算 今日 ${state.dayCalls}/${config.dailyCallLimit} · 本会话 ${config.sessionCallLimit}`,
         `运行态 熔断 ${breaker.state.open ? 'OPEN' : 'closed'} · 在飞 ${limiter.active}/排队 ${limiter.queued} · 缓存 ${cache.stats.hits}/${cache.stats.hits + cache.stats.misses} 命中（${cache.stats.size} 条）· 累计请求 ${jev?.stats.calls ?? 0}`,
@@ -761,6 +798,25 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
                 breaker = createBreaker({ failures: config.breakerFailures, cooldownMs: config.breakerCooldownMs })
                 cache = createCache<{ verdict: Verdict, ms: number }>(config.cacheMaxEntries, config.cacheTtlMs)
                 send(res, 200, { ok: true, settings: { enabled: config.enabled, maxItems: config.maxItems, requestTimeoutMs: config.requestTimeoutMs, callBudgetMs: config.callBudgetMs, concurrency: config.concurrency, cacheTtlMs: config.cacheTtlMs } })
+                return
+              }
+              if (req.method === 'POST' && route === 'bench') {
+                /*
+                 * The suite takes minutes at corpus scale, so it is reachable as a
+                 * route a shell can call in the background — a long tool call would
+                 * block the very turn that is waiting for the answer.
+                 */
+                const body = await readBody(req) as { engines?: string[], stateChars?: number, verbose?: boolean }
+                const known = knownEngines()
+                const wanted = Array.isArray(body?.engines) ? body.engines.filter((x): x is string => typeof x === 'string') : config.engines
+                const { engines } = selectEngines(wanted, known)
+                const reports = []
+                for (const engine of engines) {
+                  const trials: Trial[] = await runSuite(engine, typeof body?.stateChars === 'number' ? body.stateChars : 0)
+                  reports.push(summarizeEngine(engine.id, engine.label, FIXTURES, trials, percentiles))
+                }
+                append(ledgerDir, { t: Date.now(), kind: 'bench', engines: engines.map(engine => engine.id), fixtures: FIXTURES.length })
+                send(res, 200, { ok: true, fixtures: FIXTURES.length, markdown: renderBench(reports, FIXTURES, body?.verbose === true) })
                 return
               }
               if (req.method === 'POST' && route === 'heal-client') {
