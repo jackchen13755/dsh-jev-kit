@@ -936,6 +936,35 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                 })
                 return
               }
+              if (req.method === 'POST' && route === 'triage') {
+                /*
+                 * The generic door: another tool has an event (a test run just failed, a
+                 * log arrived, a bug report was opened) and this plugin has the wording
+                 * and the calibration. Splitting it this way is what lets the guard keep
+                 * its hooks without copying 23 channel definitions into it — and it is
+                 * why an event can get an entry point without touching any project.
+                 *
+                 * Advisory channels only: this route never blocks anything, it returns a
+                 * verdict for the caller to show.
+                 */
+                const body = await readBody(req) as { channel?: string, items?: string[], context?: string, task?: string }
+                const channel = channelOf(typeof body?.channel === 'string' ? body.channel : '')
+                if (!channel) { send(res, 400, { ok: false, error: `未知通道：${JSON.stringify(body?.channel)}` }); return }
+                if (channel.per !== 'item') { send(res, 400, { ok: false, error: `通道 ${channel.id} 不是逐条判定，请用 items 传一条整体输入` }); return }
+                const items = (Array.isArray(body?.items) ? body.items : []).filter((x): x is string => typeof x === 'string' && x.trim().length > 0).slice(0, config.maxItems)
+                if (!items.length) { send(res, 400, { ok: false, error: 'items 为空' }); return }
+                const units = items.map((text, index) => ({ text, where: items.length > 1 ? `#${index + 1}` : '' }))
+                const result = await runUnits(channel.id, units, typeof body?.context === 'string' && body.context ? body.context : 'tool', { task: body?.task })
+                send(res, 200, {
+                  ok: true,
+                  channel: channel.id,
+                  units: result.items.length,
+                  flagged: result.items.filter(item => item.verdict.level === 'flag').length,
+                  findings: result.items.map(item => ({ where: item.where, level: item.verdict.level, headline: item.verdict.headline, values: item.verdict.values })),
+                  markdown: renderCall(result),
+                })
+                return
+              }
               if (req.method === 'POST' && route === 'scope-check') {
                 /*
                  * "Only change what was asked" — the user's own standing rule, turned
@@ -1142,7 +1171,7 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
     ctx.inject?.(['commands'], (scope: KitContext) => {
       scope.effect(() => scope.commands?.register({
         name: 'jev-kit',
-        description: 'Jev 决策工具箱：scan [路径] / scope <任务> / report [days] / channels / status',
+        description: 'Jev 决策工具箱：scan [路径] / scope <任务> / triage <日志> / report [days] / channels / status',
         input: { hint: 'scan [repo] | scope <task> | report [days] | channels | status' },
         handler: async (invocation: { rawInput: string, cwd?: string }) => {
           const raw = invocation.rawInput.trim()
@@ -1170,6 +1199,30 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
             const result = await runUnits('scope_check', hunksOf(diff, config.maxItems), 'command', { task })
             return { kind: 'success' as const, text: `**改动范围核对**（任务：${task}）\n\n${renderCall(result)}` }
           }
+          if (sub === 'triage') {
+            /*
+             * `/jev-kit triage <file|-> [channel]` — the log-triage entry point.
+             *
+             * Reading the file here (rather than asking for a paste) is the whole point:
+             * a CI log is 10k lines and nobody pastes one into a tool call.
+             */
+            const target = rest[0] ?? ''
+            const channelId = rest[1] ?? 'log_triage'
+            if (!target) return { kind: 'error' as const, text: '用法：/jev-kit triage <日志文件> [通道]（通道默认 log_triage；`-` 表示读标准输入）' }
+            let text = ''
+            try {
+              text = target === '-' ? '' : fs.readFileSync(target, 'utf8')
+            } catch (error) {
+              return { kind: 'error' as const, text: `读不到 ${target}：${(error as Error).message}` }
+            }
+            if (!text.trim()) return { kind: 'error' as const, text: `${target} 是空的（或用了 '-' 但本命令没有 stdin）。` }
+            const lines = text.split('\n')
+            // Keep the head and the tail: logs put the summary at one end and the first
+            // failure at the other, and the middle is where the noise lives.
+            const excerpt = lines.length > 200 ? [...lines.slice(0, 80), `…（省略 ${lines.length - 160} 行）…`, ...lines.slice(-80)].join('\n') : text
+            const result = await runUnits(channelId, unitsOf(excerpt, config.maxItems), 'command')
+            return { kind: 'success' as const, text: `**${target}**（${lines.length} 行 → ${result.items.length} 段）\n\n${renderCall(result)}` }
+          }
           if (sub === 'report') {
             const days = Math.max(1, Math.min(90, Number(rest[0]) || 7))
             return { kind: 'success' as const, text: render(summarize(load(ledgerDir, days), days)) }
@@ -1184,7 +1237,7 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
             text: [
               `dsh-jev-kit v${VERSION} · enabled=${config.enabled} · key=${keyState.source} · 通道 ${CHANNEL_LIST.length}`,
               `ledger ${ledgerDir}`,
-              '用法：/jev-kit scan [路径] · /jev-kit scope <任务> · /jev-kit report [days] · /jev-kit channels',
+              '用法：/jev-kit scan [路径] · /jev-kit scope <任务> · /jev-kit triage <日志文件> [通道] · /jev-kit report [days] · /jev-kit channels',
             ].join('\n'),
           }
         },
