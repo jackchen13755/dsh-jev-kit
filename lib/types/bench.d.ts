@@ -117,7 +117,17 @@ export interface ThresholdFit {
     n: number;
     /** True when the fitted cut actually changes a decision on this corpus. */
     changes: boolean;
+    /**
+     * Separation on the same values. A cut fitted on a channel that barely orders
+     * its cases is overfitting: the "best" threshold there is an artefact of which
+     * side happened to land where, and it will not survive the next corpus.
+     */
+    separation: number | undefined;
+    /** True when the fitted cut is worth acting on (enough separation to trust it). */
+    trustworthy: boolean;
 }
+/** Separation below which a fitted threshold is noise rather than calibration. */
+export declare const FITTABLE_SEPARATION = 0.75;
 /** Fit one cut per numeric channel from labelled values. */
 export declare function fitThresholds(fixtures: Fixture[], trials: Trial[], current?: Record<string, number>): ThresholdFit[];
 export interface EngineReport {

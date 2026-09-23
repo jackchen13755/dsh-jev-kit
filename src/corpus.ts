@@ -29,10 +29,9 @@ const SECRET_ELEMENTS = [
   'AWS_SECRET_ACCESS_KEY=K7fQ2mZx9pLd4Rt6Yb1Nc8Vw3Hs5Jg0Ae2Ui7Oq',
   'redis://default:s3cr3t-p4ss@cache.acme-corp.internal:6379',
   'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxIn0.abc123signature',
-  // The body decodes to the words "fake-key-material-for-testing-only": a PEM
-  // block the semantic scanner should flag, which no key detector should mistake
-  // for a real one.
-  '-----BEGIN RSA PRIVATE KEY-----\n%s\n-----END RSA PRIVATE KEY-----' % 'ZmFrZS1rZXktbWF0ZXJpYWwtZm9yLXRlc3Rpbmctb25seS1ub3QtYS1yZWFsLWtleQ==',
+  // The body decodes to the words "fake-key-material-for-testing-only": a PEM block
+  // the semantic scanner should flag, which no key detector should mistake for real.
+  `-----BEGIN RSA PRIVATE KEY-----\nZmFrZS1rZXktbWF0ZXJpYWwtZm9yLXRlc3Rpbmctb25seS1ub3QtYS1yZWFsLWtleQ==\n-----END RSA PRIVATE KEY-----`,
   'smtp_password = "mail-9f3c2ab77d1e"',
   'mysql://root:Passw0rd!@10.20.30.40:3306/prod',
   'SLACK_TOKEN=slack-bot-token-9f3c2ab77d1e4f0a8b6c5d4e',

@@ -72,6 +72,22 @@ test('every fixture scores a field its channel actually publishes', () => {
   }
 })
 
+test('composed fixtures contain what they claim, at runtime', () => {
+  /*
+   * A fixture that compiles can still be garbage: a Python-style `%s` inside a
+   * TypeScript string evaluates to NaN at runtime, which would have made one
+   * privacy case a test of nothing. Assert the value, not the syntax.
+   */
+  const pem = FIXTURES.find(fixture => fixture.id.startsWith('priv_secret_') && String(fixture.state.text).includes('PRIVATE KEY'))
+  assert.ok(pem, 'a private-key fixture exists')
+  const text = String(pem.state.text)
+  assert.match(text, /-----BEGIN RSA PRIVATE KEY-----\n[A-Za-z0-9+/=]{20,}\n-----END RSA PRIVATE KEY-----/, 'the PEM block has a body')
+  assert.doesNotMatch(text, /NaN|%s|undefined/, 'no formatting leftovers')
+  for (const fixture of FIXTURES) {
+    assert.doesNotMatch(String(fixture.state.text ?? ''), /NaN|%s\b/, `${fixture.id} has no formatting leftovers`)
+  }
+})
+
 test('separation is threshold-free and counts ties as half', () => {
   assert.equal(separation([0.9], [0.1]), 1)
   assert.equal(separation([0.1], [0.9]), 0)
@@ -136,8 +152,23 @@ test('the corpus fits its own threshold when the hand-picked cut is in the wrong
   assert.equal(fit.accuracyNow, 0.4, 'the assumed cut gets two of five right')
   assert.equal(fit.accuracyFitted, 1, 'the fitted cut gets all five')
   assert.equal(fit.changes, true)
+  assert.equal(fit.separation, 1, 'perfectly ordered groups')
+  assert.equal(fit.trustworthy, true, 'a well-separated channel may be re-cut')
   // A channel with one side only cannot be fitted, and says nothing rather than guessing.
   assert.deepEqual(fitThresholds([fixtures[0]], [trials[0]], { risk: 0.5 }), [])
+  // Interleaved groups: a cut can always be found that fits *this* corpus, which is
+  // exactly why a low-separation fit is reported as untrustworthy rather than offered.
+  const noisy = [
+    ...[0.9, 0.1].map((_, i) => ({ id: `nhi${i}`, channel: 'flaky', truth: 't', expect: { kind: 'high', field: 'flaky' }, state: {} })),
+    ...[0.8, 0.2].map((_, i) => ({ id: `nlo${i}`, channel: 'flaky', truth: 't', expect: { kind: 'low', field: 'flaky' }, state: {} })),
+  ]
+  const noisyTrials = [
+    ...[0.9, 0.1].map((value, i) => ({ fixture: `nhi${i}`, channel: 'flaky', engine: 'x', ok: false, value })),
+    ...[0.8, 0.2].map((value, i) => ({ fixture: `nlo${i}`, channel: 'flaky', engine: 'x', ok: false, value })),
+  ]
+  const [noisyFit] = fitThresholds(noisy, noisyTrials, { flaky: 0.6 })
+  assert.equal(noisyFit.separation, 0.5, 'interleaved: chance')
+  assert.equal(noisyFit.trustworthy, false, 'a chance-level channel must not be re-cut')
 })
 
 test('an unknown engine id surfaces instead of being silently dropped', () => {

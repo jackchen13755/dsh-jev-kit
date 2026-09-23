@@ -251,7 +251,18 @@ export interface ThresholdFit {
   n: number
   /** True when the fitted cut actually changes a decision on this corpus. */
   changes: boolean
+  /**
+   * Separation on the same values. A cut fitted on a channel that barely orders
+   * its cases is overfitting: the "best" threshold there is an artefact of which
+   * side happened to land where, and it will not survive the next corpus.
+   */
+  separation: number | undefined
+  /** True when the fitted cut is worth acting on (enough separation to trust it). */
+  trustworthy: boolean
 }
+
+/** Separation below which a fitted threshold is noise rather than calibration. */
+export const FITTABLE_SEPARATION = 0.75
 
 /** Fit one cut per numeric channel from labelled values. */
 export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Record<string, number> = DEFAULT_THRESHOLDS): ThresholdFit[] {
@@ -274,6 +285,7 @@ export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Re
       if (accuracy > best.accuracy + 1e-9) best = { cut, accuracy }
     }
     const now = accuracyAt(current[channel] ?? 0.5)
+    const sep = separation(pairs.filter(pair => pair.high).map(pair => pair.value), pairs.filter(pair => !pair.high).map(pair => pair.value))
     out.push({
       channel,
       current: current[channel] ?? 0.5,
@@ -282,6 +294,8 @@ export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Re
       accuracyFitted: Number(best.accuracy.toFixed(3)),
       n: pairs.length,
       changes: Math.abs(best.cut - (current[channel] ?? 0.5)) > 0.01,
+      separation: sep,
+      trustworthy: (sep ?? 0) >= FITTABLE_SEPARATION,
     })
   }
   return out.sort((a, b) => (b.accuracyFitted - b.accuracyNow) - (a.accuracyFitted - a.accuracyNow))
@@ -358,13 +372,17 @@ export function renderBench (reports: EngineReport[], fixtures: Fixture[], verbo
     for (const row of report.byChannel) {
       lines.push(`| ${row.channel} | ${row.n} | ${row.pass}/${row.n} | ${row.separation === undefined ? '—（需一高一低两条夹具）' : row.separation.toFixed(2)} | ${row.p50}ms |`)
     }
-    const adjustable = report.thresholds.filter(fit => fit.changes && fit.accuracyFitted > fit.accuracyNow + 0.02)
+    const adjustable = report.thresholds.filter(fit => fit.trustworthy && fit.changes && fit.accuracyFitted > fit.accuracyNow + 0.02)
+    const unfittable = report.thresholds.filter(fit => !fit.trustworthy)
     if (adjustable.length) {
       lines.push('阈值建议（**这些通道不是判错，是刀口位置不对**：分离度好而通过率低 = 排序对、概率刻度不对）', '', '| 通道 | 现值 | 语料拟合值 | 通过率 | 拟合后 | n |', '|---|---|---|---|---|---|')
       for (const fit of adjustable) {
         lines.push(`| ${fit.channel} | ${fit.current.toFixed(2)} | **${fit.recommended.toFixed(2)}** | ${(fit.accuracyNow * 100).toFixed(0)}% | **${(fit.accuracyFitted * 100).toFixed(0)}%** | ${fit.n} |`)
       }
       lines.push('')
+    }
+    if (unfittable.length) {
+      lines.push(`不可拟合（分离度 < ${FITTABLE_SEPARATION}：在这种通道上"最佳刀口"是过拟合，**别照着改**）`, '', unfittable.map(fit => `\`${fit.channel}\` 分离度 ${(fit.separation ?? 0).toFixed(2)}（现值 ${fit.current.toFixed(2)}）`).join(' · '), '')
     }
   }
 
