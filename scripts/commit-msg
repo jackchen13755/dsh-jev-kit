@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# dsh-jev-kit commit-msg — does the message describe this diff?
+#
+# The two questions are the ones a reviewer asks first: does the message match what
+# changed, and does the diff contain anything the message does not account for.
+# Together they catch the "顺手改了点别的" commit before it enters history.
+#
+# $1 is the path to the commit message file (git's contract).
+set -uo pipefail
+[ "${JEV_SKIP_CHECKS:-0}" = "1" ] && exit 0
+[ "${JEV_SKIP_COMMIT_MSG:-0}" = "1" ] && exit 0
+
+message_file="${1:-}"
+[ -n "$message_file" ] && [ -f "$message_file" ] || exit 0
+# A comment-only or empty message (e.g. --amend --no-edit) has nothing to judge.
+message=$(grep -v '^#' "$message_file" | sed '/^[[:space:]]*$/d' || true)
+[ -z "$message" ] && exit 0
+
+diff=$(git diff --cached --no-color -U0 || true)
+[ -z "$diff" ] && exit 0
+
+payload=$(DIFF="$diff" MSG="$message" python3 -c 'import json,os; print(json.dumps({"message": os.environ["MSG"], "diff": os.environ["DIFF"]}))' 2>/dev/null || true)
+[ -n "$payload" ] || exit 0
+
+response=$(curl -sS -m 120 -X POST "${JEV_KIT_COMMIT_ENDPOINT:-http://127.0.0.1:3080/dsh-jev-kit/api/check-commit}" \
+  -H 'content-type: application/json' -d "$payload" 2>/dev/null || true)
+if [ -z "$response" ]; then
+  echo "jev-kit commit-msg: ⚠️ 判定服务不可达，本次跳过（不代表信息与 diff 相符）。" >&2
+  exit 0
+fi
+
+flagged=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("flagged", 0))' 2>/dev/null || echo 0)
+[ "${flagged:-0}" = "0" ] && exit 0
+
+echo "" >&2
+printf '%s' "$response" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+print("jev-kit commit-msg: 提交信息与 diff 可能不相符：", file=sys.stderr)
+for finding in data.get("findings", []):
+    print("  · %s" % finding.get("headline"), file=sys.stderr)
+' 2>/dev/null
+echo "  确认无误：JEV_ALLOW_COMMIT=1 git commit，或 JEV_SKIP_COMMIT_MSG=1。" >&2
+[ "${JEV_ALLOW_COMMIT:-0}" = "1" ] && exit 0
+exit 1

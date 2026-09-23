@@ -200,6 +200,8 @@ export interface Trial {
   level?: string
   ms?: number
   error?: string
+  /** Scored by ordering only; excluded from the pass rate. */
+  thresholdFree?: boolean
 }
 
 /**
@@ -219,8 +221,15 @@ export function separation (high: number[], low: number[]): number | undefined {
 }
 
 /** Does this verdict satisfy the fixture's expectation? */
-export function check (fixture: Fixture, verdict: Verdict): { ok: boolean, value?: number | string, why?: string } {
+export function check (fixture: Fixture, verdict: Verdict): { ok: boolean, value?: number | string, why?: string, thresholdFree?: boolean } {
   const at = thresholdOf(fixture.channel)
+  /*
+   * A channel with no threshold (`rank`, `recall_rerank`: both declare `at: 0`
+   * because they exist to *order* things) cannot be scored by a cut. Counting it as
+   * a pass would inflate the rate; counting it as a failure would be worse. It is
+   * excluded from the pass rate and judged only by separation — the report says so.
+   */
+  if (at <= 0) return { ok: true, value: typeof verdict.values[fixture.expect.field] === 'number' ? verdict.values[fixture.expect.field] as number : undefined, thresholdFree: true }
   if (fixture.expect.kind === 'choice') {
     const value = verdict.values[fixture.expect.field]
     const ok = String(value) === fixture.expect.equals
@@ -326,6 +335,13 @@ export function fittedTable (fits: ThresholdFit[]): Record<string, number> {
 export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Record<string, number> = DEFAULT_THRESHOLDS): ThresholdFit[] {
   const out: ThresholdFit[] = []
   for (const channel of [...new Set(fixtures.map(fixture => fixture.channel))]) {
+    /*
+     * Ordering-only channels are never fitted. `rank` and `recall_rerank` declare a
+     * zero threshold because they exist to sort, not to cut — so the first version of
+     * this table cheerfully suggested "cut `rank` at 1.98", which is a category error
+     * dressed as a number. The pass rate already excludes them; the fit must too.
+     */
+    if ((DEFAULT_THRESHOLDS[channel] ?? 0.5) <= 0) continue
     const pairs: Array<{ value: number, high: boolean }> = []
     for (const fixture of fixtures.filter(item => item.channel === channel)) {
       if (fixture.expect.kind === 'choice') continue
@@ -415,7 +431,9 @@ export interface EngineReport {
   note?: string
   trials: Trial[]
   pass: number
+  /** Thresholded fixtures only; ordering-only channels are counted separately. */
   total: number
+  thresholdFree: number
   latency: { p50: number, p95: number }
   byChannel: Array<{ channel: string, n: number, pass: number, separation?: number, p50: number }>
   /** Per-channel cut the corpus itself implies (see {@link fitThresholds}). */
@@ -424,8 +442,9 @@ export interface EngineReport {
 
 /** Summarise one engine's trials into the numbers the decision actually needs. */
 export function summarizeEngine (engine: string, label: string, fixtures: Fixture[], trials: Trial[], percentile: (values: number[]) => { p50: number, p95: number }): EngineReport {
-  const judged = trials.filter(trial => !trial.error)
+  const judged = trials.filter(trial => !trial.error && trial.thresholdFree !== true)
   const pass = judged.filter(trial => trial.ok).length
+  const thresholdFree = trials.filter(trial => trial.thresholdFree === true).length
   const byChannel: EngineReport['byChannel'] = []
   for (const channel of [...new Set(fixtures.map(fixture => fixture.channel))]) {
     const own = fixtures.filter(fixture => fixture.channel === channel)
@@ -455,7 +474,8 @@ export function summarizeEngine (engine: string, label: string, fixtures: Fixtur
     note: trials.find(trial => trial.error)?.error,
     trials,
     pass,
-    total: fixtures.length,
+    total: fixtures.length - thresholdFree,
+    thresholdFree,
     latency: latencies.length ? percentile(latencies) : { p50: 0, p95: 0 },
     byChannel,
     thresholds: fitThresholds(fixtures, trials),
@@ -471,7 +491,7 @@ export function renderBench (reports: EngineReport[], fixtures: Fixture[], verbo
   ]
   for (const report of reports) {
     const head = report.status === 'ok'
-      ? `${report.pass}/${report.total} 达到真值 · p50 ${report.latency.p50}ms · p95 ${report.latency.p95}ms`
+      ? `${report.pass}/${report.total} 达到真值${report.thresholdFree ? `（另有 ${report.thresholdFree} 条**只排序、不计通过率**）` : ''} · p50 ${report.latency.p50}ms · p95 ${report.latency.p95}ms`
       : report.status === 'unavailable' ? `**不可用**（${report.note ?? '未探测到'}）——不计为通过，也不计入分母` : `**出错**：${report.note ?? '未知'}`
     lines.push(`### ${report.label}`, head, '')
     if (report.status !== 'ok') { lines.push(''); continue }
@@ -538,6 +558,8 @@ export function renderBench (reports: EngineReport[], fixtures: Fixture[], verbo
   }
 
   lines.push(
+    '排序类通道（`rank` / `recall_rerank`）**不拟合阈值也不计入通过率**：它们存在的意义是排序，',
+    '拿刀口衡量是范畴错误——只看分离度。',
     '读法：**分离度是主指标**（阈值无关，跨引擎可比）；"达到真值"用的是本通道自己的阈值，只是次指标——',
     '两家校准不同，拿同一把刀切会冤枉其中一方。引擎不可用时它的那一列是空的：**"没测出来"不等于"没问题"**。',
   )

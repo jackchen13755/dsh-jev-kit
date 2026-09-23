@@ -16,14 +16,20 @@ hook="$here/pre-push"
 install_into () {
   local repo="$1"
   [ -d "$repo/.git/hooks" ] || { echo "  跳过（不是 git 仓库）: $repo"; return; }
-  # Refuse to clobber someone else's hook without saying so.
-  if [ -f "$repo/.git/hooks/pre-push" ] && ! grep -q "dsh-jev-kit" "$repo/.git/hooks/pre-push" 2>/dev/null; then
-    echo "  ⚠️ $repo 已有别人的 pre-push，未覆盖（请手工合并 $hook）"
-    return
-  fi
-  cp "$hook" "$repo/.git/hooks/pre-push"
-  chmod +x "$repo/.git/hooks/pre-push"
-  echo "  ✓ 已安装: $repo/.git/hooks/pre-push"
+  # Three hooks, three events: privacy at push time, i18n + scope at commit time,
+  # message-vs-diff right after the message exists. Each one is copied rather than
+  # symlinked, and none of them clobbers a hook written by someone else.
+  for name in pre-push pre-commit commit-msg; do
+    src="$here/$name"
+    [ -f "$src" ] || continue
+    if [ -f "$repo/.git/hooks/$name" ] && ! grep -q "dsh-jev-kit" "$repo/.git/hooks/$name" 2>/dev/null; then
+      echo "  ⚠️ $repo 已有别人的 $name，未覆盖（请手工合并 $src）"
+      continue
+    fi
+    cp "$src" "$repo/.git/hooks/$name"
+    chmod +x "$repo/.git/hooks/$name"
+    echo "  ✓ $name → $repo/.git/hooks/"
+  done
 }
 
 if [ "${1:-}" = "--all" ]; then

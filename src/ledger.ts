@@ -22,6 +22,16 @@ export type LedgerRecord =
     /** The verdict's headline numbers (probabilities, choices, scores). */
     values: Record<string, number | string | undefined>
     ms?: number; via?: 'jev' | 'cache'; chars: number; item?: number
+    /**
+     * Which entry produced this judgment: `hook`, `card`, `command`, `test`, or a
+     * session id.
+     *
+     * Without it the ledger cannot answer the only question that decides where to
+     * build next — "which entry point is actually earning its keep?". Measured
+     * 2026-09-23 before adding it: 593 of 608 judgments came from one entry (the
+     * push hook) and there was no way to see that from the rows themselves.
+     */
+    session?: string
     /** Wording fingerprint of the channel at decision time (drift detection). */
     qh?: string
     /** Set when the caller reported whether it acted on the advice. */
@@ -90,6 +100,14 @@ export interface KitReport {
    * benchmark — the report should say so rather than implying they are in service.
    */
   unusedChannels: string[]
+  /**
+   * Judgments per entry point.
+   *
+   * This is the number that decides where the next integration goes: a channel with
+   * a working entry accumulates calls on its own, a channel without one stays at
+   * zero no matter how good its wording is.
+   */
+  byEntry: Array<{ entry: string, n: number, flag: number }>
 }
 
 const mean = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0)
@@ -128,6 +146,17 @@ export function summarize (records: LedgerRecord[], days: number, usdPerMTok = 0
       degraded: records.filter(r => r.kind === 'degraded').length,
       errors: records.filter(r => r.kind === 'error').length,
     },
+    byEntry: (() => {
+      const counts = new Map<string, { n: number, flag: number }>()
+      for (const row of decisions) {
+        const entry = row.session ?? '(未记录)'
+        const own = counts.get(entry) ?? { n: 0, flag: 0 }
+        own.n++
+        if (row.level === 'flag') own.flag++
+        counts.set(entry, own)
+      }
+      return [...counts.entries()].map(([entry, own]) => ({ entry, ...own })).sort((a, b) => b.n - a.n)
+    })(),
     unusedChannels: (() => {
       const used = new Set(decisions.map(row => row.channel))
       return ALL_CHANNELS.filter(channel => !used.has(channel))
@@ -165,6 +194,9 @@ export function render (report: KitReport): string {
       ? `⚠️ 降级 ${report.health.degraded} · 失败 ${report.health.errors}（失败永远不记成"没问题"）`
       : '无降级、无失败',
     '',
+    report.byEntry.length
+      ? `按入口：${report.byEntry.map(row => `\`${row.entry}\`×${row.n}${row.flag ? `(⛔${row.flag})` : ''}`).join(' · ')} —— **没有入口的通道永远是 0，无论问句写得多好**`
+      : '',
     report.unusedChannels.length
       ? `从未被真实调用过的通道（${report.unusedChannels.length}）：${report.unusedChannels.map(c => `\`${c}\``).join(' · ')} —— 评测能证明"它能判"，只有用法能证明"有人要"。停用它们：设置里的 disabledChannels。`
       : '每个通道都被真实调用过。',

@@ -239,6 +239,27 @@ test('hunks keep their header, which is what makes the judgment possible', () =>
 
 /* ── ledger + settings ───────────────────────────────────────────────── */
 
+test('the report names which entry point produced the judgments', () => {
+  /*
+   * Why this matters more than any per-channel number: on 2026-09-23, 593 of 608
+   * judgments came from a single entry (the push hook) while 22 channels sat at
+   * zero. Without an entry column the ledger cannot tell "unused channel" from
+   * "unwired channel" — and only the second is worth building.
+   */
+  const dir = tmp()
+  const now = Date.now()
+  append(dir, { t: now, kind: 'decision', channel: 'private_scan', group: 'P', level: 'flag', values: {}, via: 'jev', chars: 10, ms: 500, session: 'hook' })
+  append(dir, { t: now + 1, kind: 'decision', channel: 'private_scan', group: 'P', level: 'info', values: {}, via: 'jev', chars: 10, ms: 500, session: 'hook' })
+  append(dir, { t: now + 2, kind: 'decision', channel: 'log_triage', group: 'C', level: 'info', values: {}, via: 'jev', chars: 10, ms: 500, session: 'session-abc' })
+  const report = summarize(load(dir, 1, new Date(now)), 1)
+  assert.deepEqual(report.byEntry[0], { entry: 'hook', n: 2, flag: 1 })
+  assert.equal(report.byEntry[1].entry, 'session-abc')
+  const text = render(report)
+  assert.match(text, /按入口/)
+  assert.match(text, /`hook`×2\(⛔1\)/)
+  assert.match(text, /没有入口的通道永远是 0/)
+})
+
 test('the ledger groups by channel and never counts a failure as neutral', () => {
   const dir = tmp()
   const now = Date.now()

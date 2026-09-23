@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+#
+# dsh-jev-kit pre-commit — two checks that belong at commit time, not push time.
+#
+#   ① i18n: a new locale entry must not duplicate an existing meaning, and must not
+#      invent a second word for something the copy already names.
+#   ② scope: when a task is declared (`JEV_TASK` or a `.jev-task` file), each staged
+#      hunk is judged against it — "only change what was asked" as a check rather
+#      than a habit.
+#
+# Failure policy matches the pre-push hook: a check that cannot run warns and lets
+# the commit through (a gate that blocks when its service is down teaches people to
+# use --no-verify), while a finding blocks with an explicit escape hatch.
+set -uo pipefail
+
+[ "${JEV_SKIP_CHECKS:-0}" = "1" ] && exit 0
+# The installed copy lives in .git/hooks/, where its siblings do not exist; the
+# plugin checkout is the source of truth for the gate scripts.
+here="${JEV_KIT_SCRIPTS:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+if [ ! -f "$here/i18n-gate.mjs" ]; then
+  for candidate in "$HOME/Desktop/dsh/github/dsh-jev-kit/scripts" "$(git rev-parse --show-toplevel 2>/dev/null)/../dsh-jev-kit/scripts"; do
+    [ -f "$candidate/i18n-gate.mjs" ] && { here="$candidate"; break; }
+  done
+fi
+status=0
+
+# ── ① i18n ────────────────────────────────────────────────────────────────
+if [ "${JEV_SKIP_I18N:-0}" != "1" ]; then
+  # Run it and read the status *directly*. `if ! cmd; then code=$?` looks equivalent
+  # and is not: inside that branch `$?` is the status of the negation, which is always
+  # 0 — so the gate reported findings and then let the commit through. Measured, then
+  # fixed.
+  node "$here/i18n-gate.mjs" "$(git rev-parse --show-toplevel)" 2>&1
+  code=$?
+  # 0 = clean, 1 = findings (block), 2 = could not check (already explained: do not block)
+  if [ "$code" = "1" ]; then status=1; fi
+fi
+
+# ── ② scope ───────────────────────────────────────────────────────────────
+task="${JEV_TASK:-}"
+if [ -z "$task" ] && [ -f "$(git rev-parse --show-toplevel)/.jev-task" ]; then
+  task="$(head -c 2000 "$(git rev-parse --show-toplevel)/.jev-task")"
+fi
+if [ -n "$task" ]; then
+  diff=$(git diff --cached --no-color -U0 || true)
+  if [ -n "$diff" ]; then
+    payload=$(DIFF="$diff" TASK="$task" python3 -c 'import json,os; print(json.dumps({"task": os.environ["TASK"], "diff": os.environ["DIFF"]}))' 2>/dev/null || true)
+    if [ -n "$payload" ]; then
+      response=$(curl -sS -m 120 -X POST "${JEV_KIT_SCOPE_ENDPOINT:-http://127.0.0.1:3080/dsh-jev-kit/api/scope-check}" \
+        -H 'content-type: application/json' -d "$payload" 2>/dev/null || true)
+      if [ -z "$response" ]; then
+        echo "jev-kit pre-commit: ⚠️ 范围核对不可达，本次跳过（不代表改动都在范围内）。" >&2
+      else
+        flagged=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("flagged", 0))' 2>/dev/null || echo 0)
+        if [ "${flagged:-0}" != "0" ]; then
+          echo "" >&2
+          printf '%s' "$response" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+print("jev-kit pre-commit: 范围核对发现 %s 处疑似超出任务：" % data.get("flagged"), file=sys.stderr)
+for finding in data.get("findings", []):
+    print("  · %s — %s" % (finding.get("where"), finding.get("headline")), file=sys.stderr)
+' 2>/dev/null
+          echo "  这些改动确实属于本任务时：JEV_ALLOW_COMMIT=1 git commit" >&2
+          [ "${JEV_ALLOW_COMMIT:-0}" != "1" ] && status=1
+        fi
+      fi
+    fi
+  fi
+else
+  echo "jev-kit pre-commit: 未声明任务（JEV_TASK 或 .jev-task），跳过范围核对。" >&2
+fi
+
+exit "$status"

@@ -54,6 +54,8 @@ export interface Trial {
     level?: string;
     ms?: number;
     error?: string;
+    /** Scored by ordering only; excluded from the pass rate. */
+    thresholdFree?: boolean;
 }
 /**
  * Rank-based separation between the fixtures that should score high and those that
@@ -70,6 +72,7 @@ export declare function check(fixture: Fixture, verdict: Verdict): {
     ok: boolean;
     value?: number | string;
     why?: string;
+    thresholdFree?: boolean;
 };
 /**
  * The threshold a channel's own corpus says it should use.
@@ -157,7 +160,9 @@ export interface EngineReport {
     note?: string;
     trials: Trial[];
     pass: number;
+    /** Thresholded fixtures only; ordering-only channels are counted separately. */
     total: number;
+    thresholdFree: number;
     latency: {
         p50: number;
         p95: number;
