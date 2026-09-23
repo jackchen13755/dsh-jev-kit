@@ -8,6 +8,14 @@ export interface KitContext {
     tools: {
         register(definition: unknown): () => void;
     };
+    /**
+     * Event subscription — the seam the automatic lane hangs on (`tools/post-execute`).
+     *
+     * Optional and structurally typed, like the rest of this interface: the kit builds
+     * against the installed tool types only, and a host without the event seam must still
+     * get the tools and the git-hook routes rather than crash at load.
+     */
+    on?(event: string, listener: (...args: never[]) => unknown): () => void;
     effect(callback: () => unknown, label?: string): void;
     inject?(deps: string[], callback: (scope: KitContext) => void): void;
     commands?: {

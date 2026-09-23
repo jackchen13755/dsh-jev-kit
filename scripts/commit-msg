@@ -30,7 +30,17 @@ if [ -z "$response" ]; then
   exit 0
 fi
 
-flagged=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("flagged", 0))' 2>/dev/null || echo 0)
+read -r flagged failed <<EOF
+$(printf '%s' "$response" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("flagged",0), d.get("failed",0))' 2>/dev/null || echo "0 0")
+EOF
+# A unit the model never judged is not a match: say so rather than passing quietly.
+if [ "${failed:-0}" != "0" ]; then
+  echo "jev-kit commit-msg: ⚠️ 有 $failed 条**未能判定**（模型没回答）——本次不阻塞，但不代表信息与 diff 相符。" >&2
+  printf '%s' "$response" | python3 -c '
+import json, sys
+for why in (json.load(sys.stdin).get("failures") or [])[:5]: print("    · %s" % why, file=sys.stderr)
+' 2>/dev/null || true
+fi
 [ "${flagged:-0}" = "0" ] && exit 0
 
 echo "" >&2

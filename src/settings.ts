@@ -26,6 +26,58 @@ export interface KitSettings {
   maxItems: number
   /** In-flight requests. */
   concurrency: number
+  /**
+   * Foreground lane: the budget one judgment gets when something is waiting on it.
+   *
+   * `requestTimeoutMs` is a *batch* ceiling — 8s is fine when a hook is the only caller.
+   * A lane that holds a turn must be an order of magnitude smaller, or "helping" costs
+   * more than it saves; lens puts its critical-path screen at 1.2s for the same reason.
+   */
+  foregroundTimeoutMs: number
+  /**
+   * In-flight limit for foreground judgments, deliberately separate from `concurrency`.
+   *
+   * Sharing one limiter means a foreground call queues behind whatever batch is in
+   * flight, which turns a background instrument into foreground latency — the one thing
+   * an advisory tool must never add.
+   */
+  foregroundConcurrency: number
+  /**
+   * The automatic lane: should a failed tool call be triaged without anyone asking?
+   *
+   * Measured on 2026-09-23: every channel designed to *replace* a frontier round trip —
+   * `sufficient`, `route`, `duplicate_call`, `evidence_check` — had **zero** calls, and
+   * the family's own conclusion was that the bottleneck is entry points, not channels.
+   * Lens has an automatic lane (`pre`/`post-execute`, shadow by default); kit had none,
+   * which is why 14 of 23 channels sat at zero: they had no moment at which to fire.
+   *
+   *   · `off`    — no automatic judgment at all.
+   *   · `shadow` — judge and record, say nothing. The default, because the first job of
+   *                an automatic lane is to prove it would have been right; the report
+   *                then shows what it said, and the entry shows up in `byEntry`.
+   *
+   * A `warn` mode (surface the verdict as a note on the tool result) is the next step:
+   * it needs the note channel from `@deepseek-ai/dsh-llm`, which is a dependency this
+   * package does not yet declare, so it is deliberately not claimed here.
+   */
+  autoTriage: 'off' | 'shadow'
+  /**
+   * Channels the automatic lane may fire, by id. One channel, not the catalogue: an
+   * automatic lane that fires everything is a bill with no reader.
+   */
+  autoChannels: string[]
+  /** Ceiling on automatic judgments per session — the lane must not outspend the turn. */
+  autoMaxPerSession: number
+  /**
+   * Which engine serves which channel, by channel id (e.g. `{ log_triage: 'laya' }`).
+   *
+   * `engines` picks one engine for the whole catalogue, which forces a single choice
+   * between paying the hosted model for trivia and putting the hard channels on a
+   * weaker reader. The bench already measures separation per channel *per engine*, so
+   * the evidence to route on exists; this is the knob that spends it. A channel absent
+   * here uses the first configured engine.
+   */
+  engineByChannel: Record<string, string>
   /** Verdict cache TTL. Same input answers the same way, so this is pure saving. */
   cacheTtlMs: number
   cacheMaxEntries: number
@@ -77,7 +129,19 @@ export const KIT_DEFAULTS: KitSettings = {
   callBudgetMs: 90_000,
   maxItems: 40,
   concurrency: 4,
-  cacheTtlMs: 900_000,
+  foregroundTimeoutMs: 1200,
+  foregroundConcurrency: 2,
+  autoTriage: 'shadow',
+  autoChannels: ['failure_triage'],
+  autoMaxPerSession: 24,
+  engineByChannel: {},
+  /*
+   * 24h, not 15 minutes. A verdict is a deterministic function of (state, questions,
+   * cuts) and the cache key includes all three, so a longer TTL cannot replay a verdict
+   * made under different rules — it only stops re-buying answers already bought. Lens
+   * keeps its screen cache for the same 24h for the same reason.
+   */
+  cacheTtlMs: 86_400_000,
   cacheMaxEntries: 2000,
   breakerFailures: 3,
   breakerCooldownMs: 120_000,
@@ -96,6 +160,9 @@ const BOUNDS: Record<string, [number, number]> = {
   callBudgetMs: [1_000, 900_000],
   maxItems: [1, 500],
   concurrency: [1, 16],
+  foregroundTimeoutMs: [200, 30_000],
+  foregroundConcurrency: [1, 16],
+  autoMaxPerSession: [0, 500],
   cacheTtlMs: [0, 86_400_000],
   cacheMaxEntries: [0, 100_000],
   breakerFailures: [1, 100],
@@ -111,6 +178,13 @@ export function validate (value: KitSettings): string | undefined {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value.apiKeyRef)) return `apiKeyRef 必须形如 ENV_VAR_NAME（当前 ${JSON.stringify(value.apiKeyRef)}）`
   for (const channel of value.disabledChannels ?? []) {
     if (!/^[a-z][a-z0-9_:-]*$/.test(channel)) return `disabledChannels 里有不合法的通道名：${JSON.stringify(channel)}`
+  }
+  if (value.autoTriage !== 'off' && value.autoTriage !== 'shadow') return `autoTriage 只能是 off / shadow（当前 ${JSON.stringify(value.autoTriage)}）`
+  for (const channel of value.autoChannels ?? []) {
+    if (!/^[a-z][a-z0-9_:-]*$/.test(channel)) return `autoChannels 里有不合法的通道名：${JSON.stringify(channel)}`
+  }
+  for (const [channel, engine] of Object.entries(value.engineByChannel ?? {})) {
+    if (typeof engine !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(engine)) return `engineByChannel.${channel} 必须是引擎 id（当前 ${JSON.stringify(engine)}）`
   }
   for (const [channel, cut] of Object.entries(value.thresholds ?? {})) {
     if (typeof cut !== 'number' || !Number.isFinite(cut) || cut < 0 || cut > 1) return `thresholds.${channel} 必须在 0–1 之间（当前 ${JSON.stringify(cut)}）`
@@ -131,6 +205,8 @@ export function merge (base: KitSettings, patch: unknown): KitSettings {
   if (typeof input.apiKeyRef === 'string' && input.apiKeyRef.trim()) out.apiKeyRef = input.apiKeyRef.trim()
   if (Array.isArray(input.redactExtra)) out.redactExtra = input.redactExtra.filter((x): x is string => typeof x === 'string')
   if (Array.isArray(input.disabledChannels)) out.disabledChannels = input.disabledChannels.filter((x): x is string => typeof x === 'string')
+  if (Array.isArray(input.autoChannels)) out.autoChannels = input.autoChannels.filter((x): x is string => typeof x === 'string')
+  if (input.autoTriage === 'off' || input.autoTriage === 'shadow') out.autoTriage = input.autoTriage
   if (typeof input.defaultRepo === 'string') out.defaultRepo = input.defaultRepo.trim()
   if (input.thresholds && typeof input.thresholds === 'object') {
     /*
@@ -151,6 +227,18 @@ export function merge (base: KitSettings, patch: unknown): KitSettings {
       if (typeof cut === 'number' && Number.isFinite(cut) && cut >= 0 && cut <= 1) merged[channel] = cut
     }
     out.thresholds = merged
+  }
+  if (input.engineByChannel && typeof input.engineByChannel === 'object') {
+    /*
+     * Merged for the same reason `thresholds` is: a patch that names one channel must
+     * not silently drop the routing of every other one.
+     */
+    const routes: Record<string, string> = { ...(base.engineByChannel ?? {}) }
+    for (const [channel, engine] of Object.entries(input.engineByChannel as Record<string, unknown>)) {
+      if (engine === null) { delete routes[channel]; continue }
+      if (typeof engine === 'string' && engine.trim()) routes[channel] = engine.trim()
+    }
+    out.engineByChannel = routes
   }
   for (const field of Object.keys(BOUNDS) as Array<keyof KitSettings>) {
     const value = input[field]
@@ -180,4 +268,30 @@ export function saveStored (dir: string, value: KitSettings): boolean {
   } catch {
     return false
   }
+}
+
+/**
+ * Whether the automatic lane may fire, and what it may do — as a pure function.
+ *
+ * Kept out of the observer so the policy can be tested without a running host: an
+ * automatic lane's worst failure is not being wrong, it is being unbounded.
+ *
+ * @param input - the mode, the call's outcome, and what this session has spent.
+ * @returns `shadow` when the lane should judge and record, else `skip`.
+ */
+export function autoPlan (input: {
+  mode: KitSettings['autoTriage']
+  autoChannels: string[]
+  channel: string
+  isError: boolean
+  usedThisSession: number
+  cap: number
+}): 'shadow' | 'skip' {
+  if (input.mode === 'off') return 'skip'
+  if (!input.autoChannels.includes(input.channel)) return 'skip'
+  // Only failures: a successful call has nothing to triage, and firing on every call
+  // would make the lane cost more than the round trip it is meant to save.
+  if (!input.isError) return 'skip'
+  if (input.cap <= 0 || input.usedThisSession >= input.cap) return 'skip'
+  return 'shadow'
 }

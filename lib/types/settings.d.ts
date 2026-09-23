@@ -12,6 +12,58 @@ export interface KitSettings {
     maxItems: number;
     /** In-flight requests. */
     concurrency: number;
+    /**
+     * Foreground lane: the budget one judgment gets when something is waiting on it.
+     *
+     * `requestTimeoutMs` is a *batch* ceiling — 8s is fine when a hook is the only caller.
+     * A lane that holds a turn must be an order of magnitude smaller, or "helping" costs
+     * more than it saves; lens puts its critical-path screen at 1.2s for the same reason.
+     */
+    foregroundTimeoutMs: number;
+    /**
+     * In-flight limit for foreground judgments, deliberately separate from `concurrency`.
+     *
+     * Sharing one limiter means a foreground call queues behind whatever batch is in
+     * flight, which turns a background instrument into foreground latency — the one thing
+     * an advisory tool must never add.
+     */
+    foregroundConcurrency: number;
+    /**
+     * The automatic lane: should a failed tool call be triaged without anyone asking?
+     *
+     * Measured on 2026-09-23: every channel designed to *replace* a frontier round trip —
+     * `sufficient`, `route`, `duplicate_call`, `evidence_check` — had **zero** calls, and
+     * the family's own conclusion was that the bottleneck is entry points, not channels.
+     * Lens has an automatic lane (`pre`/`post-execute`, shadow by default); kit had none,
+     * which is why 14 of 23 channels sat at zero: they had no moment at which to fire.
+     *
+     *   · `off`    — no automatic judgment at all.
+     *   · `shadow` — judge and record, say nothing. The default, because the first job of
+     *                an automatic lane is to prove it would have been right; the report
+     *                then shows what it said, and the entry shows up in `byEntry`.
+     *
+     * A `warn` mode (surface the verdict as a note on the tool result) is the next step:
+     * it needs the note channel from `@deepseek-ai/dsh-llm`, which is a dependency this
+     * package does not yet declare, so it is deliberately not claimed here.
+     */
+    autoTriage: 'off' | 'shadow';
+    /**
+     * Channels the automatic lane may fire, by id. One channel, not the catalogue: an
+     * automatic lane that fires everything is a bill with no reader.
+     */
+    autoChannels: string[];
+    /** Ceiling on automatic judgments per session — the lane must not outspend the turn. */
+    autoMaxPerSession: number;
+    /**
+     * Which engine serves which channel, by channel id (e.g. `{ log_triage: 'laya' }`).
+     *
+     * `engines` picks one engine for the whole catalogue, which forces a single choice
+     * between paying the hosted model for trivia and putting the hard channels on a
+     * weaker reader. The bench already measures separation per channel *per engine*, so
+     * the evidence to route on exists; this is the knob that spends it. A channel absent
+     * here uses the first configured engine.
+     */
+    engineByChannel: Record<string, string>;
     /** Verdict cache TTL. Same input answers the same way, so this is pure saving. */
     cacheTtlMs: number;
     cacheMaxEntries: number;
@@ -64,3 +116,20 @@ export declare function merge(base: KitSettings, patch: unknown): KitSettings;
 export declare function loadStored(dir: string): Partial<KitSettings> | undefined;
 /** Persist settings, owner-only. Returns false when it could not land. */
 export declare function saveStored(dir: string, value: KitSettings): boolean;
+/**
+ * Whether the automatic lane may fire, and what it may do — as a pure function.
+ *
+ * Kept out of the observer so the policy can be tested without a running host: an
+ * automatic lane's worst failure is not being wrong, it is being unbounded.
+ *
+ * @param input - the mode, the call's outcome, and what this session has spent.
+ * @returns `shadow` when the lane should judge and record, else `skip`.
+ */
+export declare function autoPlan(input: {
+    mode: KitSettings['autoTriage'];
+    autoChannels: string[];
+    channel: string;
+    isError: boolean;
+    usedThisSession: number;
+    cap: number;
+}): 'shadow' | 'skip';

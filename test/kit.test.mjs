@@ -14,9 +14,9 @@ import os from 'node:os'
 import path from 'node:path'
 
 import { CHANNELS, CHANNEL_LIST, channelOf, DEFAULT_THRESHOLDS } from '../lib/channels.js'
-import { isDiff, diffUnits, textUnits, hunksOf, unitsOf } from '../lib/segments.js'
+import { isDiff, diffUnits, textUnits, hunksOf, unitsOf, splitOversized, MAX_UNIT_CHARS } from '../lib/segments.js'
 import { append, load, summarize, render, verdictOf, MIN_SAMPLE } from '../lib/ledger.js'
-import { KIT_DEFAULTS, merge, validate, loadStored, saveStored } from '../lib/settings.js'
+import { KIT_DEFAULTS, autoPlan, merge, validate, loadStored, saveStored } from '../lib/settings.js'
 import { trimState } from '../lib/engines.js'
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'jev-kit-'))
@@ -322,4 +322,92 @@ test('settings round-trip through storage and survive corruption', () => {
   assert.equal(fs.statSync(path.join(dir, 'config.json')).mode & 0o777, 0o600)
   fs.writeFileSync(path.join(dir, 'config.json'), '{ broken')
   assert.equal(loadStored(dir), undefined)
+})
+
+test('an oversized unit is split, never truncated, so no request is rejected for size', () => {
+  /*
+   * Nine ledger failures read `Jev 400 max_tokens_exceeded` on private_scan and
+   * commit_message — the two channels a push gate depends on, and both failures landed
+   * on the largest diffs. Truncating would have been the easy fix and the wrong one: the
+   * tail of a long line is where a leaked blob hides. Splitting keeps every character.
+   */
+  // 40 lines of 1000 chars: one unit, over the ceiling, splittable on line boundaries.
+  const lines = Array.from({ length: 40 }, (_, i) => `+${String(i).padStart(3, '0')}${'y'.repeat(997)}`)
+  const diff = 'diff --git a/big.txt b/big.txt\n--- a/big.txt\n+++ b/big.txt\n@@ -1,0 +1,40 @@\n' + lines.join('\n') + '\n'
+  const units = unitsOf(diff, 40)
+  assert.ok(units.length > 1, 'the unit was split')
+  for (const unit of units) assert.ok(unit.text.length <= MAX_UNIT_CHARS, `part exceeds the ceiling: ${unit.text.length}`)
+  // Nothing was dropped: every original line survives somewhere.
+  const joined = units.map(u => u.text).join('\n')
+  for (const line of lines) assert.ok(joined.includes(line), 'no line was truncated away')
+  assert.match(units[0].where, /第 1\//, 'the part index is visible to a reader')
+
+  // A single line longer than the ceiling cannot be split on boundaries: slice it.
+  const oneLine = '+const blob = "' + 'A'.repeat(MAX_UNIT_CHARS * 2 + 500) + '"'
+  const sliced = unitsOf(`diff --git a/b.ts b/b.ts\n--- a/b.ts\n+++ b/b.ts\n@@ -1,0 +1,1 @@\n${oneLine}\n`, 40)
+  assert.ok(sliced.length >= 3, 'a long single line is sliced, not dropped')
+  for (const unit of sliced) assert.ok(unit.text.length <= MAX_UNIT_CHARS)
+  assert.equal(sliced.map(u => u.text).join('').includes('A'.repeat(MAX_UNIT_CHARS * 2)), true, 'the whole line is still covered')
+
+  // Small units pass through untouched — splitting must not rewrite the common case.
+  const small = unitsOf('diff --git a/s.ts b/s.ts\n--- a/s.ts\n+++ b/s.ts\n@@ -1,0 +1,1 @@\n+const a = 1\n', 40)
+  assert.equal(small.length, 1)
+  assert.equal(splitOversized([]).length, 0)
+})
+
+test('the foreground lane is separate from the batch lane, and routing merges like thresholds', () => {
+  /*
+   * Two knobs that exist so an advisory instrument cannot become the latency it was
+   * meant to remove: a foreground call gets its own (much smaller) budget and its own
+   * in-flight limit, so it never queues behind a batch.
+   */
+  assert.ok(KIT_DEFAULTS.foregroundTimeoutMs < KIT_DEFAULTS.requestTimeoutMs, 'the lane that holds a turn is cheaper than the batch ceiling')
+  assert.ok(KIT_DEFAULTS.foregroundConcurrency <= KIT_DEFAULTS.concurrency)
+  assert.equal(validate(KIT_DEFAULTS), undefined, 'the shipped defaults validate')
+  assert.match(String(validate({ ...KIT_DEFAULTS, foregroundTimeoutMs: 5 })), /foregroundTimeoutMs 必须在 200–30000/)
+  assert.match(String(validate({ ...KIT_DEFAULTS, foregroundConcurrency: 0 })), /foregroundConcurrency 必须在 1–16/)
+  assert.match(String(validate({ ...KIT_DEFAULTS, engineByChannel: { log_triage: 'Not An Id' } })), /engineByChannel.log_triage/)
+
+  // Routing survives an unrelated patch, exactly like thresholds — and removal is expressible.
+  const routed = merge(KIT_DEFAULTS, { engineByChannel: { log_triage: 'laya', i18n_key: 'jev' } })
+  assert.deepEqual(routed.engineByChannel, { log_triage: 'laya', i18n_key: 'jev' })
+  const after = merge(routed, { engineByChannel: { pick: 'laya' } })
+  assert.equal(after.engineByChannel.log_triage, 'laya', 'an unrelated patch does not drop existing routes')
+  assert.equal(after.engineByChannel.pick, 'laya')
+  assert.equal(merge(after, { engineByChannel: { pick: null } }).engineByChannel.pick, undefined)
+
+  // A verdict is not the same across engines, so the cache must not be either: the key
+  // is built in index.ts, and this pins the property the key depends on.
+  assert.equal(typeof KIT_DEFAULTS.cacheTtlMs, 'number')
+  assert.ok(KIT_DEFAULTS.cacheTtlMs >= 86_400_000, 'the default TTL is a day, not fifteen minutes')
+})
+
+test('the automatic lane is narrow, bounded, and off the critical path by default', () => {
+  /*
+   * The structural gap this lane closes: kit was purely on-demand, so every channel
+   * built to replace a frontier round trip (`sufficient`, `route`, `duplicate_call`,
+   * `evidence_check`) sat at ZERO calls. Lens has had a `post-execute` lane all along.
+   *
+   * What must hold: it fires only on failures, only for the named channels, never more
+   * than the per-session cap, and it defaults to shadow — a lane whose first act is to
+   * talk during a turn has not earned the right to.
+   */
+  const base = { mode: KIT_DEFAULTS.autoTriage, autoChannels: ['failure_triage'], channel: 'failure_triage', isError: true, usedThisSession: 0, cap: 24 }
+  assert.equal(KIT_DEFAULTS.autoTriage, 'shadow', 'shadow, not warn: measure before speaking')
+  assert.equal(autoPlan(base), 'shadow')
+  assert.equal(autoPlan({ ...base, mode: 'off' }), 'skip', 'off means off')
+  assert.equal(autoPlan({ ...base, isError: false }), 'skip', 'a successful call has nothing to triage')
+  assert.equal(autoPlan({ ...base, channel: 'log_triage' }), 'skip', 'only the named channels may fire automatically')
+  assert.equal(autoPlan({ ...base, usedThisSession: 24 }), 'skip', 'the session cap holds')
+  assert.equal(autoPlan({ ...base, usedThisSession: 23 }), 'shadow')
+  assert.equal(autoPlan({ ...base, cap: 0 }), 'skip', 'a zero cap disables the lane')
+  // The lane is capped and validated like every other setting.
+  assert.match(String(validate({ ...KIT_DEFAULTS, autoTriage: 'warn' })), /autoTriage 只能是 off \/ shadow/)
+  assert.match(String(validate({ ...KIT_DEFAULTS, autoChannels: ['Not A Channel'] })), /autoChannels/)
+  assert.match(String(validate({ ...KIT_DEFAULTS, autoMaxPerSession: 10_000 })), /autoMaxPerSession 必须在 0–500/)
+  assert.equal(validate(KIT_DEFAULTS), undefined)
+  // A patch that says nothing about the lane leaves it alone.
+  assert.deepEqual(merge(KIT_DEFAULTS, { maxItems: 5 }).autoChannels, ['failure_triage'])
+  assert.equal(merge(KIT_DEFAULTS, { autoTriage: 'off' }).autoTriage, 'off')
+  assert.equal(merge(KIT_DEFAULTS, { autoTriage: 'nonsense' }).autoTriage, 'shadow', 'an unusable value is ignored, not stored')
 })

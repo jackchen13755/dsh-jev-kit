@@ -51,7 +51,13 @@ if [ -n "$task" ]; then
       if [ -z "$response" ]; then
         echo "jev-kit pre-commit: ⚠️ 范围核对不可达，本次跳过（不代表改动都在范围内）。" >&2
       else
-        flagged=$(printf '%s' "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("flagged", 0))' 2>/dev/null || echo 0)
+        read -r flagged failed <<EOF
+$(printf '%s' "$response" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("flagged",0), d.get("failed",0))' 2>/dev/null || echo "0 0")
+EOF
+        # Same rule as the other two hooks: an unjudged hunk is not an in-scope one.
+        if [ "${failed:-0}" != "0" ]; then
+          echo "jev-kit pre-commit: ⚠️ 有 $failed 条**未能判定**（模型没回答）——本次不阻塞范围核对，但不代表这些 hunk 属于任务。" >&2
+        fi
         if [ "${flagged:-0}" != "0" ]; then
           echo "" >&2
           printf '%s' "$response" | python3 -c '

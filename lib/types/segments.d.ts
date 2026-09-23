@@ -14,6 +14,32 @@ export interface Unit {
     text: string;
     where: string;
 }
+/**
+ * Character ceiling for one unit — i.e. for one judgment request.
+ *
+ * Measured on this machine: the hosted model rejects an oversized state outright
+ * (`Jev 400 {"error_type":"max_tokens_exceeded"}`), and nine such failures had
+ * accumulated in the ledger, all of them on `private_scan`/`commit_message` — the two
+ * channels a push gate depends on, failing on the *largest* diffs.
+ *
+ * The remedy is to **split**, not to truncate. Truncating would drop the tail of a long
+ * minified line or a base64 blob, which is exactly where a leaked credential hides;
+ * splitting costs one more request and keeps the coverage. 12000 characters sits well
+ * under the smallest state known to succeed (59311 chars) and keeps a request cheap.
+ */
+export declare const MAX_UNIT_CHARS = 12000;
+/**
+ * Split units so that no single request can be rejected for size.
+ *
+ * A unit is split on line boundaries where possible. A *single* line can itself exceed
+ * the ceiling (a minified bundle, a base64 payload), and that case is sliced — with the
+ * part index kept in `where`, so a finding still points at something a reader can find.
+ *
+ * @param units - units from any splitter.
+ * @param maxChars - the ceiling; defaults to {@link MAX_UNIT_CHARS}.
+ * @returns the same units, with oversized ones replaced by consecutive parts.
+ */
+export declare function splitOversized(units: Unit[], maxChars?: number): Unit[];
 /** Is this text a unified diff rather than prose? */
 export declare function isDiff(text: string): boolean;
 /**

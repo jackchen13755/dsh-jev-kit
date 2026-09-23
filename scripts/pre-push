@@ -166,16 +166,33 @@ import json, sys
 try:
     data = json.load(sys.stdin)
 except Exception:
-    print("unparsable 0"); raise SystemExit
+    print("unparsable 0 0"); raise SystemExit
 if data.get("ok") is not True:
-    print("error %s" % (data.get("error") or "unknown"))
+    print("error %s 0" % (data.get("error") or "unknown"))
 else:
-    print("ok %s" % data.get("flagged", 0))
-' 2>/dev/null || echo "unparsable 0")
+    print("ok %s %s" % (data.get("flagged", 0), data.get("failed", 0)))
+' 2>/dev/null || echo "unparsable 0 0")
 
-case "$verdict" in
-  ok\ 0) exit 0 ;;
-  ok\ *) flagged="${verdict#ok }" ;;
+# Three parts: status, flagged, failed. `failed` counts units the model never judged
+# (a 400 for an oversized unit, a timeout, a breaker) — reading `flagged: 0` beside a
+# non-zero `failed` as "clean" is the silent pass this hook exists to prevent, and it
+# lands hardest on the largest diffs.
+set -- $verdict
+status="$1"; flagged="${2:-0}"; failed="${3:-0}"
+
+case "$status" in
+  ok)
+    if [ "$failed" != "0" ]; then
+      echo "jev-kit pre-push: ⚠️ 有 $failed 条**未能判定**（模型没回答），本次不阻塞推送——但它不等于干净，请看一眼下面的原因。" >&2
+      printf '%s' "$response" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+for why in (data.get("failures") or [])[:5]: print("    · %s" % why, file=sys.stderr)
+' 2>/dev/null || true
+      [ "$flagged" = "0" ] && exit 0
+    fi
+    [ "$flagged" = "0" ] && exit 0
+    ;;
   *)
     echo "jev-kit pre-push: ⚠️ 扫描未能完成（$verdict）——本次不阻塞推送，但**这不代表 diff 干净**。" >&2
     exit 0
