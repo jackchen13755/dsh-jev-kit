@@ -34,7 +34,7 @@ import {
   type WebRequestLike, type WebResponseLike, type WebServerLike,
 } from '@dsh-external/dsh-jev-core'
 import { CHANNEL_LIST, channelOf, setReaderThresholds, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
-import { hunksOf, unitsOf, type Unit } from './segments.js'
+import { MAX_UNIT_CHARS, hunksOf, unitsOf, type Unit } from './segments.js'
 import { jevEngine, layaEngine, selectEngines, trimState, type Engine } from './engines.js'
 import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, fittedTable, fitVerdictOf, setThresholdOverrides, thresholdOverrides, thresholdOf, questionHash, questionHashes, wordingDrift, type BenchRecord, type Fixture, type ThresholdFit, type Trial } from './bench.js'
 import { append, load, render, summarize, type LedgerRecord } from './ledger.js'
@@ -384,7 +384,7 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
   }
 
   /** Judge every unit, bounded by item count and by the call's own budget. */
-  async function runUnits (channelId: string, units: Unit[], session: string, extra: ChannelState = {}): Promise<CallResult> {
+  async function runUnits (channelId: string, units: Unit[], session: string, extra: ChannelState = {}, stateOf?: (unit: Unit) => ChannelState): Promise<CallResult> {
     const channel = channelOf(channelId)
     if (!channel) throw new Error(`unknown channel: ${channelId}`)
     if (config.disabledChannels.includes(channel.id)) {
@@ -403,7 +403,12 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
         if (Date.now() - started > config.callBudgetMs) { stopReason = `超出单次调用预算 ${config.callBudgetMs}ms，提前结束`; return }
         const index = cursor++
         const unit = capped[index] as Unit
-        const channelState: ChannelState = { text: unit.text, ...extra }
+        /*
+         * Most channels read the unit as `text`; a channel whose question is *about*
+         * two things (the commit message and the diff) needs the unit placed in its own
+         * field, which is what `stateOf` is for.
+         */
+        const channelState: ChannelState = stateOf ? stateOf(unit) : { text: unit.text, ...extra }
         const result = await judge(channel, channelState, session, errors)
         if (result) items.push({ ...result, where: unit.where })
         else degraded++
@@ -1164,10 +1169,26 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                 const message = typeof body?.message === 'string' ? body.message.trim() : ''
                 const diff = typeof body?.diff === 'string' ? body.diff : ''
                 if (!message || !diff) { send(res, 400, { ok: false, error: '需要 message 与 diff' }); return }
-                const state = { text: message, other: diff.slice(0, 120_000) }
-                const result = await runInput('commit_message', state, 'commit-msg')
+                /*
+                 * One request when it fits, and **one per hunk when it does not**.
+                 *
+                 * This used to slice the diff at 120k characters and send that as a single
+                 * state, which managed both failure modes at once: text past the cut was
+                 * silently never read, and the state was still large enough for the model to
+                 * reject it outright (`max_tokens_exceeded` — measured on this repository's
+                 * own commits, which then read as "信息与 diff 相符" because a failed
+                 * judgment was invisible to the hook).
+                 *
+                 * Splitting keeps every hunk read and points a finding at the hunk it came
+                 * from, while staying bounded by `maxItems` (the remainder is reported as
+                 * skipped, never dropped silently). The single-request path stays for the
+                 * ordinary case, where the question really is about the diff as a whole.
+                 */
+                const result = diff.length <= MAX_UNIT_CHARS
+                  ? await runInput('commit_message', { text: message, other: diff }, 'commit-msg')
+                  : await runUnits('commit_message', hunksOf(diff, config.maxItems), 'commit-msg', {}, unit => ({ text: message, other: unit.text }))
                 const flagged = result.items.some(item => item.verdict.level === 'warn' || item.verdict.level === 'flag')
-                send(res, 200, { ok: true, flagged: flagged ? 1 : 0, failed: result.degraded, failures: result.errors, findings: flagged ? result.items.map(item => ({ where: '', headline: item.verdict.headline, values: item.verdict.values })) : [], markdown: renderCall(result) })
+                send(res, 200, { ok: true, flagged: flagged ? 1 : 0, failed: result.degraded, failures: result.errors, findings: flagged ? result.items.map(item => ({ where: item.where ?? '', headline: item.verdict.headline, values: item.verdict.values })) : [], markdown: renderCall(result) })
                 return
               }
               if (req.method === 'POST' && route === 'key') {

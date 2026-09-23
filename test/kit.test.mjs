@@ -453,3 +453,32 @@ test('a late report of "acted on" reaches the report, and stays honest when ther
   report = summarize(load(dir, 1, new Date(now)), 1)
   assert.equal(report.channels.find(channel => channel.channel === 'log_triage').actedYes, 1)
 })
+
+test('a commit bigger than one request is judged per hunk, not truncated and not failed', () => {
+  /*
+   * `check-commit` used to slice the diff at 120k characters and send that as one state.
+   * That managed both failure modes at once: text past the cut was silently never read,
+   * and the state stayed large enough for the model to reject it (`max_tokens_exceeded`
+   * — measured on this repository's own commits). A rejected judgment then read as
+   * "信息与 diff 相符", because a failure was invisible to the hook.
+   *
+   * What must hold now: every hunk is present, each is small enough to be accepted, and
+   * the aggregate can point at the hunk a finding came from.
+   */
+  const hunks = Array.from({ length: 40 }, (_, h) =>
+    `@@ -${h * 10},3 +${h * 10},63 @@\n context\n` + Array.from({ length: 60 }, (_, i) => `+const helper${h}_${i} = ${i}`).join('\n'))
+  const diff = 'diff --git a/src/big.ts b/src/big.ts\n--- a/src/big.ts\n+++ b/src/big.ts\n' + hunks.join('\n') + '\n'
+  assert.ok(diff.length > MAX_UNIT_CHARS, 'the fixture is bigger than one request')
+
+  const units = hunksOf(diff, 40)
+  assert.equal(units.length, 40, 'every hunk is a unit — nothing is dropped by a character cut')
+  for (const unit of units) assert.ok(unit.text.length <= MAX_UNIT_CHARS, 'and each unit fits in one request')
+  // The hunk header survives, which is what lets a finding name a location.
+  assert.match(units[0].text, /@@ -0,3 \+0,63 @@/)
+  assert.match(units[0].where, /src\/big\.ts/)
+
+  // A diff that fits is still one request about the diff as a whole.
+  const small = 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new\n'
+  assert.ok(small.length <= MAX_UNIT_CHARS)
+  assert.equal(hunksOf(small, 40).length, 1)
+})
