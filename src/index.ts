@@ -267,7 +267,15 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     const questions = channel.questions(channelState)
     if (!Object.keys(questions).length) return null
     const chars = JSON.stringify(channelState).length
-    const cacheKey = keyOf([channel.id, VERSION, prep(JSON.stringify(channelState))])
+    /*
+     * The cache key includes the **thresholds and the wording fingerprint**, not just
+     * the input. A verdict is a function of (state, questions, cuts), so keying on the
+     * state alone replays decisions made under different rules: after raising the
+     * internal cut to 0.75, cached rows computed at 0.50 kept coming back as findings —
+     * ordinary TypeScript reported as "internal information" at scores of 0.02–0.34.
+     * That looked exactly like a false-positive storm and was a stale cache.
+     */
+    const cacheKey = keyOf([channel.id, VERSION, questionHash(channel.id), config.thresholds, prep(JSON.stringify(channelState))])
     const cached = cache.get(cacheKey)
     if (cached) {
       append(ledgerDir, { t: Date.now(), kind: 'decision', channel: channel.id, group: channel.group, level: cached.verdict.level, values: cached.verdict.values, via: 'cache', chars, ms: cached.ms, session })
@@ -1061,6 +1069,13 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                 append(ledgerDir, { t: Date.now(), kind: 'bench', engines: engines.map(engine => engine.id), fixtures: FIXTURES.length })
                 const details = reports.flatMap(report => report.thresholds)
                 const table = fittedTable(details)
+                /*
+                 * Read the previous record **before** writing the new one. The first
+                 * version saved first and then asked "did the wording drift?", which
+                 * compares the new hashes against themselves — a check that could
+                 * never fire, which is worse than no check because it looks like one.
+                 */
+                const previous = loadBenchRecord()
                 saveBenchRecord(engines.map(engine => engine.id), FIXTURES.length, details, table)
                 /*
                  * `check: true` turns the run into a gate for CI: every channel with
@@ -1073,7 +1088,7 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                 const failures = reports.flatMap(report => report.byChannel
                   .filter(row => row.n >= 10 && row.separation !== undefined && row.separation < floor)
                   .map(row => ({ engine: report.engine, channel: row.channel, separation: row.separation, floor })))
-                const drift = wordingDrift(loadBenchRecord())
+                const drift = wordingDrift(previous)
                 send(res, 200, {
                   ok: failures.length === 0,
                   check: body?.check === true ? { passed: failures.length === 0, failures, wordingDrift: drift, floor } : undefined,

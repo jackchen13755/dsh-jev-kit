@@ -100,6 +100,13 @@ export interface ThresholdFit {
     n: number;
     /** True when the fitted cut actually changes a decision on this corpus. */
     changes: boolean;
+    /** Gap between the highest negative and the lowest positive (NaN if one side is empty). */
+    margin: number;
+    /**
+     * How the recommended cut was chosen. `margin` = midpoint of the gap (chosen when
+     * every cut in the gap is equally accurate); `accuracy` = the grid point that won.
+     */
+    recommendedBy: 'margin' | 'accuracy';
     /**
      * Separation on the same values. A cut fitted on a channel that barely orders
      * its cases is overfitting: the "best" threshold there is an artefact of which

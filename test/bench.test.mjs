@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { FIXTURES, COMMAND_FIXTURES, separation, check, questionsFor, verdictFor, summarizeEngine, renderBench, fitThresholds, setThresholdOverrides, thresholdOf, fittedTable } from '../lib/bench.js'
+import { COMMAND_FIXTURES, FIXTURES, check, fitThresholds, fittedTable, questionHash, questionsFor, renderBench, separation, setThresholdOverrides, summarizeEngine, thresholdOf, verdictFor, wordingDrift } from '../lib/bench.js'
 import { CHANNEL_LIST, channelOf } from '../lib/channels.js'
 import { selectEngines } from '../lib/engines.js'
 import { percentiles } from '@dsh-external/dsh-jev-core'
@@ -121,6 +121,53 @@ test('a canned answer set produces the verdict the channel would produce live', 
   })
   assert.equal(verdict.level, 'flag')
   assert.equal(check(fixture, verdict).ok, true)
+})
+
+test('wording drift is detected from the recorded fingerprints, and only for questions', () => {
+  /*
+   * The gate that protects the calibration: a threshold measured against one wording
+   * is not a threshold for another. It must fire when a *question* changes and stay
+   * quiet for anything else — a title tweak is not a reason to re-fit, and a check
+   * that fires on everything gets ignored.
+   */
+  const record = { at: Date.now(), fixtures: 1, engines: ['jev'], thresholds: {}, details: [], hashes: { private_scan: 'deadbeef00', risk: 'cafebabe00' } }
+  const current = { private_scan: 'deadbeef00', risk: '0123456789' }
+  assert.deepEqual(wordingDrift(record, current), ['risk'], 'only the channel whose questions moved')
+  assert.deepEqual(wordingDrift(record, { ...current, risk: 'cafebabe00' }), [], 'identical fingerprints are not drift')
+  assert.deepEqual(wordingDrift(undefined, current), [], 'no recorded run means nothing to compare')
+  // The fingerprint itself must be stable across calls and distinct per channel.
+  assert.equal(questionHash('risk'), questionHash('risk'))
+  assert.notEqual(questionHash('risk'), questionHash('scope_check'))
+  assert.match(questionHash('private_scan'), /^[0-9a-f]{10}$/)
+})
+
+test('a perfectly separated channel gets the midpoint, not the edge of the grid', () => {
+  /*
+   * The regression that shipped a false-positive storm: with clean fixtures at
+   * 0.02–0.05 and dirty ones at 0.90+, every cut between the clusters is equally
+   * accurate, so "first best wins" returned the lowest grid point — `private_scan`
+   * came out at 0.04, which flags ordinary source code as leaked credentials.
+   *
+   * A cut in the middle of the gap is exactly as accurate and far more robust.
+   */
+  const fixtures = [
+    { id: 'a', channel: 'private_scan', truth: 'clean', expect: { kind: 'low', field: 'x' }, state: { text: 'a' } },
+    { id: 'b', channel: 'private_scan', truth: 'clean', expect: { kind: 'low', field: 'x' }, state: { text: 'b' } },
+    { id: 'c', channel: 'private_scan', truth: 'dirty', expect: { kind: 'high', field: 'x' }, state: { text: 'c' } },
+    { id: 'd', channel: 'private_scan', truth: 'dirty', expect: { kind: 'high', field: 'x' }, state: { text: 'd' } },
+  ]
+  const trials = [
+    { fixture: 'a', channel: 'private_scan', engine: 'jev', ok: true, value: 0.02, level: 'info' },
+    { fixture: 'b', channel: 'private_scan', engine: 'jev', ok: true, value: 0.05, level: 'info' },
+    { fixture: 'c', channel: 'private_scan', engine: 'jev', ok: true, value: 0.90, level: 'flag' },
+    { fixture: 'd', channel: 'private_scan', engine: 'jev', ok: true, value: 0.95, level: 'flag' },
+  ]
+  const report = summarizeEngine('jev', 'Jev', fixtures, trials, percentiles)
+  const fit = report.thresholds.find(row => row.channel === 'private_scan')
+  assert.equal(fit.recommendedBy, 'margin')
+  assert.equal(fit.recommended, 0.48, 'midpoint of 0.05 and 0.90, rounded to 2dp')
+  assert.ok(fit.recommended > 0.4, 'never a knife-edge cut')
+  assert.equal(Number(fit.margin.toFixed(2)), 0.85)
 })
 
 test('an unreachable engine is reported as unavailable, not as passing', () => {

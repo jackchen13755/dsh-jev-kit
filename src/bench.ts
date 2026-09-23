@@ -268,6 +268,13 @@ export interface ThresholdFit {
   n: number
   /** True when the fitted cut actually changes a decision on this corpus. */
   changes: boolean
+  /** Gap between the highest negative and the lowest positive (NaN if one side is empty). */
+  margin: number
+  /**
+   * How the recommended cut was chosen. `margin` = midpoint of the gap (chosen when
+   * every cut in the gap is equally accurate); `accuracy` = the grid point that won.
+   */
+  recommendedBy: 'margin' | 'accuracy'
   /**
    * Separation on the same values. A cut fitted on a channel that barely orders
    * its cases is overfitting: the "best" threshold there is an artefact of which
@@ -359,6 +366,28 @@ export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Re
       const accuracy = accuracyAt(cut)
       if (accuracy > best.accuracy + 1e-9) best = { cut, accuracy }
     }
+    /*
+     * Ties go to the **widest margin**, not to the lowest cut.
+     *
+     * This is the bug that shipped a false-positive storm: on a perfectly separated
+     * channel every cut between the two clusters is equally accurate, so "first best
+     * wins" picked the edge of the grid — `private_scan` came out at 0.04, i.e. "flag
+     * anything above nothing". Applied to the reader, ordinary source code scored
+     * 0.02–0.05 and was reported as leaked credentials.
+     *
+     * The robust choice is the midpoint between the highest negative and the lowest
+     * positive: it is as accurate as any other cut in the gap and it sits furthest
+     * from both clusters, so wording drift has to move a lot before it flips.
+     */
+    const negatives = pairs.filter(pair => !pair.high).map(pair => pair.value)
+    const positives = pairs.filter(pair => pair.high).map(pair => pair.value)
+    const margin = negatives.length && positives.length ? Math.min(...positives) - Math.max(...negatives) : Number.NaN
+    const marginCut = Number.isFinite(margin)
+      ? (Math.max(...negatives) + Math.min(...positives)) / 2
+      : best.cut
+    const marginAccuracy = accuracyAt(marginCut)
+    const recommended = marginAccuracy >= best.accuracy - 1e-9 ? marginCut : best.cut
+    const recommendedBy: 'margin' | 'accuracy' = recommended === marginCut ? 'margin' : 'accuracy'
     const now = accuracyAt(base)
     // Deterministic k-fold by index: no shuffling, so two runs of the same corpus
     // produce the same estimate.
@@ -384,12 +413,14 @@ export function fitThresholds (fixtures: Fixture[], trials: Trial[], current: Re
     out.push({
       channel,
       current: current[channel] ?? 0.5,
-      recommended: Number(best.cut.toFixed(2)),
+      recommended: Number(recommended.toFixed(2)),
       accuracyNow: Number(now.toFixed(3)),
       accuracyFitted: Number(best.accuracy.toFixed(3)),
       accuracyCrossVal: Number((heldOut / pairs.length).toFixed(3)),
       n: pairs.length,
-      changes: Math.abs(best.cut - (current[channel] ?? 0.5)) > 0.01,
+      margin: Number.isFinite(margin) ? margin : Number.NaN,
+      recommendedBy,
+      changes: Math.abs(recommended - (current[channel] ?? 0.5)) > 0.01,
       separation: sep,
       // Trustworthy means: it orders well AND the gain survives being scored on
       // data the fit never saw.
@@ -510,7 +541,8 @@ export function renderBench (reports: EngineReport[], fixtures: Fixture[], verbo
     if (adjustable.length) {
       lines.push('阈值建议（**这些通道不是判错，是刀口位置不对**：分离度好而通过率低 = 排序对、概率刻度不对）', '', '| 通道 | 现值 | 拟合值 | 现在 | 样本内 | **交叉验证** | n |', '|---|---|---|---|---|---|---|')
       for (const fit of adjustable) {
-        lines.push(`| ${fit.channel} | ${fit.current.toFixed(2)} | **${fit.recommended.toFixed(2)}** | ${(fit.accuracyNow * 100).toFixed(0)}% | ${(fit.accuracyFitted * 100).toFixed(0)}% | **${(fit.accuracyCrossVal * 100).toFixed(0)}%** | ${fit.n} |`)
+        const how = fit.recommendedBy === 'margin' ? `（间隔中点，间隔 ${Number.isFinite(fit.margin) ? fit.margin.toFixed(2) : '—'}）` : ''
+        lines.push(`| ${fit.channel} | ${fit.current.toFixed(2)} | **${fit.recommended.toFixed(2)}**${how} | ${(fit.accuracyNow * 100).toFixed(0)}% | ${(fit.accuracyFitted * 100).toFixed(0)}% | **${(fit.accuracyCrossVal * 100).toFixed(0)}%** | ${fit.n} |`)
       }
       lines.push('', '读法：**只信交叉验证那一列**（在拟合没见过的折上评分）。样本内那列是"拟合记住了自己数据"的上限。', '')
       lines.push('')
