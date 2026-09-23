@@ -99,6 +99,14 @@ test('the card renders its controls and its empty state', async () => {
   assert.ok(buttons.includes('扫描暂存改动'), 'the staged-diff scan is one click, not one remembered tool call')
   assert.ok(find(tree, (node) => node.type === 'button').length >= 6, 'scan + save + test + refresh + copy + apply')
   assert.match(text, /阈值（语料拟合）/, 'the fitted-threshold section renders')
+  // The credential box is why the lens can be uninstalled without losing the UI for
+  // the one secret the family needs. It must be a password input, and it must start
+  // blank (a prefilled secret is a leaked secret).
+  const passwords = find(tree, (node) => node.type === 'input' && node.props.type === 'password')
+  assert.equal(passwords.length, 1, 'exactly one credential input')
+  assert.equal(passwords[0].props.value, '', 'and it starts empty')
+  assert.equal(passwords[0].props.autoComplete, 'off')
+  assert.match(text, /Jev 凭据/, 'the credential section renders')
 })
 
 test('the colour rule retires silent channels and never greens an unmeasured one', async () => {

@@ -72,6 +72,13 @@ window.__ModuleLoader__.load({
         budget: '今日用量',
         saveFailed: '保存失败',
         saved: '已保存',
+        credentials: 'Jev 凭据（两个插件共用）',
+        keyHelp: '粘贴 TypeSafe API key。写入 DSH 凭据库（~/.dsh/.credentials.yaml，0600），lens 与 kit 共用同一把；任何路由都不会回显它。',
+        keySave: '保存 key',
+        keyClear: '清除',
+        keySaved: '已保存，指纹',
+        keyCleared: '已清除',
+        keyMissing: '未配置',
         scanStaged: '扫描暂存改动',
         scanning: '扫描中…',
         scanClean: '暂存改动未发现语义泄漏',
@@ -121,6 +128,13 @@ window.__ModuleLoader__.load({
         budget: 'Today',
         saveFailed: 'save failed',
         saved: 'saved',
+        credentials: 'Jev credential (shared by both plugins)',
+        keyHelp: 'Paste the TypeSafe API key. It is written to the DSH credential store (~/.dsh/.credentials.yaml, 0600) and shared by lens and kit; no route ever returns it.',
+        keySave: 'Save key',
+        keyClear: 'Clear',
+        keySaved: 'saved, fingerprint',
+        keyCleared: 'cleared',
+        keyMissing: 'not configured',
         scanStaged: 'Scan staged changes',
         scanning: 'scanning…',
         scanClean: 'no semantic leak found in staged changes',
@@ -222,6 +236,9 @@ window.__ModuleLoader__.load({
         const [status, setStatus] = React.useState(null)
         const [report, setReport] = React.useState(null)
         const [thresholds, setThresholds] = React.useState(null)
+        // Starts blank on every load: a credential box that prefills is one that leaks
+        // to whoever is looking over the shoulder.
+        const [keyDraft, setKeyDraft] = React.useState('')
         const [days, setDays] = React.useState(7)
         const [note, setNote] = React.useState('')
         const [busy, setBusy] = React.useState(false)
@@ -285,6 +302,33 @@ window.__ModuleLoader__.load({
           h('span', { style: muted }, `${t.budget} ${status?.budget?.dayCalls ?? 0}/${status?.budget?.dailyCallLimit ?? '—'}`)))
 
         if (status !== null && !keyConfigured) children.push(h('div', { key: 'nokey', style: { fontSize: '12px', color: TONE.warn } }, t.keyMissing))
+
+        children.push(h('div', { key: 'credential', style: divider },
+          h('div', { style: label }, t.credentials),
+          h('div', { style: muted }, t.keyHelp),
+          h('div', { style: row },
+            h('input', {
+              type: 'password',
+              value: keyDraft,
+              autoComplete: 'off',
+              'data-1p-ignore': 'true',
+              placeholder: status?.key?.configured ? `${status.key.source} · ${status.key.fingerprint ?? ''}` : t.keyMissing,
+              onChange: (event) => setKeyDraft(event.target.value),
+              style: { flex: '1 1 320px', fontSize: '12px', padding: '4px 8px', borderRadius: '6px', border: '1px solid rgba(127,127,127,0.4)', background: 'transparent', color: 'inherit' },
+            }),
+            button(t.keySave, keyDraft.trim() === '', async () => {
+              const response = await fetch('/dsh-jev-kit/api/key', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: keyDraft.trim() }) })
+              const body = await response.json().catch(() => ({}))
+              if (body.ok !== true) setNote(String(body.error ?? response.status))
+              else { setNote(`${t.keySaved} ${body.key?.fingerprint ?? ''}`); setKeyDraft('') }
+              await load(days)
+            }),
+            button(t.keyClear, status?.key?.configured !== true, async () => {
+              const response = await fetch('/dsh-jev-kit/api/key/clear', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+              const body = await response.json().catch(() => ({}))
+              setNote(body.ok === true ? t.keyCleared : String(body.error ?? response.status))
+              await load(days)
+            }))))
 
         children.push(h('div', { key: 'controls', style: divider },
           toggle(t.enabled, status?.enabled === true, status === null, (next) => { void write({ enabled: next }) }),
