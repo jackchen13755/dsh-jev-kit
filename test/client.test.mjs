@@ -29,8 +29,52 @@ function stubReact () {
   }
 }
 
+/**
+ * A React with real state, plus a mount driver, so a test can walk the card down the
+ * path the browser walks: render → run effects → await the fetch → re-render.
+ *
+ * `stubReact` deliberately has neither working state nor running effects, so `load()`
+ * never executes and the wire shape is never exercised. That is why a card rendering
+ * "0 records · ledger window 0d" over a *full* ledger — the route answers with an
+ * envelope and the card read the envelope as if it were the report — was able to pass
+ * every assertion in this file.
+ */
+function liveReact () {
+  const slot = { cursor: 0, values: [], effects: [], dirty: false }
+  const settle = () => new Promise((resolve) => setImmediate(resolve))
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() }),
+    useState: (initial) => {
+      const i = slot.cursor++
+      if (i >= slot.values.length) slot.values[i] = typeof initial === 'function' ? initial() : initial
+      return [slot.values[i], (next) => {
+        slot.values[i] = typeof next === 'function' ? next(slot.values[i]) : next
+        slot.dirty = true
+      }]
+    },
+    useEffect: (fn) => { slot.effects.push(fn) },
+    useCallback: (fn) => fn,
+  }
+  /** Render once, run the mount effects, then keep re-rendering while state moves. */
+  const mount = async (Component) => {
+    slot.effects = []
+    slot.cursor = 0
+    let tree = Component()
+    for (const effect of slot.effects) await effect()
+    for (let i = 0; i < 20; i++) {
+      await settle()
+      if (!slot.dirty) continue
+      slot.dirty = false
+      slot.cursor = 0
+      tree = Component()
+    }
+    return tree
+  }
+  return { React, mount }
+}
+
 /** Load the bundle and return the plugin face it registered. */
-async function boot ({ locale = 'zh' } = {}) {
+async function boot ({ locale = 'zh', react } = {}) {
   let registration
   globalThis.window = { __ModuleLoader__: { load: (value) => { registration = value } } }
   /*
@@ -41,7 +85,7 @@ async function boot ({ locale = 'zh' } = {}) {
   new Function(fs.readFileSync(bundlePath, 'utf8'))()
   assert.ok(registration, 'the bundle registers itself with __ModuleLoader__')
   assert.equal(registration.id, '@dsh-external/dsh-jev-kit')
-  const React = stubReact()
+  const React = react ?? stubReact()
   const plugin = registration.factory((name) => {
     if (name === 'react') return React
     throw new Error(`unexpected require(${name})`)
@@ -64,7 +108,11 @@ const find = (node, predicate) => {
   return [...own, ...children.flatMap((child) => find(child, predicate))]
 }
 
-const textOf = (node) => (typeof node === 'string' ? node : (node?.children ?? []).map(textOf).join(' '))
+// React renders numbers as text, so a walker that only keeps strings would report every
+// count column as empty — exactly the columns this file needs to assert on.
+const textOf = (node) => typeof node === 'string' || typeof node === 'number'
+  ? String(node)
+  : (node?.children ?? []).map(textOf).join(' ')
 
 test('the card mounts in both seats it declares', async () => {
   const { seats, applied } = await boot()
@@ -143,6 +191,74 @@ test('the copied Markdown reports the same numbers the card shows', async () => 
   const markdown = toMarkdown(report, { version: '0.1.3' }, classify(report, S.zh).rows, S.zh)
   assert.match(markdown, /### Jev 决策工具箱 v0\.1\.3/)
   assert.match(markdown, /\| flaky \| C \| 3 \| 1 \| 0 \| 640ms \| 900ms \|/)
+})
+
+test('a full ledger renders its channels, not "no records"', async () => {
+  /*
+   * `GET /api/report` answers with an envelope — `{ok, days, report, markdown}` — while
+   * `classify` and `toMarkdown` take the report itself. Reading the envelope as if it
+   * were the report is *silent*: every field is undefined, so the card rendered "0
+   * records · ledger window 0d" and the copy button produced the same empty table, over
+   * a ledger that had 4729 entries in it. A false all-clear on the one table whose only
+   * job is to retire channels.
+   *
+   * The fixtures below are the real wire shapes, because the bug lived exactly in the
+   * gap between them: a bare report is what the pure-function tests above pass in, and
+   * it is not what the route sends.
+   */
+  const { React, mount } = liveReact()
+  const bodies = {
+    '/dsh-jev-kit/api/status': {
+      version: '0.15.0',
+      enabled: true,
+      channels: 23,
+      key: { configured: true, source: 'credential:file' },
+      budget: { dayCalls: 0, dailyCallLimit: 20000 },
+    },
+    '/dsh-jev-kit/api/report?days=7': {
+      ok: true,
+      days: 7,
+      report: {
+        total: 735,
+        window: { days: 7, records: 4729 },
+        channels: [
+          { channel: 'private_scan', group: 'P', n: 700, flagged: 78, warn: 0, latency: { p50: 488, p95: 894 } },
+          { channel: 'flaky', group: 'C', n: 3, flagged: 3, warn: 0, latency: { p50: 513, p95: 986 } },
+        ],
+      },
+    },
+    // The envelope here is flat-ish (`applied`/`suggested`/`details` at the top level),
+    // which is why this section never had the bug and must not "fix" it away.
+    '/dsh-jev-kit/api/thresholds': {
+      ok: true,
+      applied: { risk: 0.42 },
+      suggested: { scope_check: 0.1 },
+      details: [{ channel: 'scope_check', current: 0.5, recommended: 0.1, accuracyCrossVal: 0.85, n: 20 }],
+    },
+  }
+  globalThis.fetch = async (url) => ({ ok: true, json: async () => bodies[String(url)] })
+  try {
+    const { seats } = await boot({ react: React })
+    const text = textOf(await mount(seats['jev-kit']))
+    assert.doesNotMatch(text, /还没有判定记录/, 'an empty reading over a full ledger is the bug this test exists for')
+    assert.match(text, /✅ 暂无需淘汰的通道/, 'the verdict line reads the real total')
+    assert.match(text, /private_scan/, 'the table shows the channels the ledger actually holds')
+    assert.match(text, /700/, 'and their counts')
+    assert.match(text, /flaky/)
+    assert.match(text, /scope_check/, 'the thresholds section keeps reading its own envelope')
+  } finally {
+    delete globalThis.fetch
+  }
+})
+
+test('the report envelope is unwrapped, and a bare report still works', async () => {
+  const { plugin } = await boot()
+  const { unwrapReport } = plugin.__internals
+  const report = { total: 735, window: { days: 7 }, channels: [{ channel: 'flaky' }] }
+  assert.equal(unwrapReport({ ok: true, days: 7, report, markdown: '…' }), report, 'the envelope is what the route sends')
+  assert.equal(unwrapReport(report), report, 'and a route that stops wrapping must not break the card')
+  assert.equal(unwrapReport(null), null)
+  assert.deepEqual(unwrapReport({ ok: true }), { ok: true })
 })
 
 test('the bundle is a ModuleLoader bundle, not an ES module', () => {

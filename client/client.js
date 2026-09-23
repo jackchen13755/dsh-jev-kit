@@ -189,6 +189,28 @@ window.__ModuleLoader__.load({
       return { level: 'ok', text: t.healthy, rows, retire: 0 }
     }
 
+    /**
+     * `GET /api/report` answers with an envelope — `{ok, days, report, markdown}` — while
+     * `classify` and `toMarkdown` take the report itself.
+     *
+     * Reading the envelope as if it were the report fails *silently*: every field it
+     * looks for is undefined, so a ledger with thousands of entries renders as "0
+     * records · window 0d" and the copy button emits the same empty table. A false
+     * all-clear on the one table whose only job is to retire channels, which is why this
+     * is unwrapped explicitly instead of defaulting to `{}`.
+     *
+     * Only the report is enveloped: `/api/status` is flat, and `/api/thresholds` keeps
+     * `applied`/`suggested`/`details` at the top level. Both shapes are tolerated here so
+     * a route that stops wrapping does not break the card.
+     *
+     * @param {object} body - whatever `GET /api/report` returned.
+     * @returns {object} the report.
+     */
+    function unwrapReport (body) {
+      if (body !== null && typeof body === 'object' && body.report !== null && typeof body.report === 'object') return body.report
+      return body
+    }
+
     /** The Markdown a person pastes into a commit message or an issue. */
     function toMarkdown (report, status, rows, t) {
       const lines = [
@@ -253,7 +275,7 @@ window.__ModuleLoader__.load({
               fetch('/dsh-jev-kit/api/thresholds', { headers: { accept: 'application/json' } }),
             ])
             if (statusResponse.ok) setStatus(await statusResponse.json())
-            if (reportResponse.ok) setReport(await reportResponse.json())
+            if (reportResponse.ok) setReport(unwrapReport(await reportResponse.json()))
             if (thresholdResponse.ok) setThresholds(await thresholdResponse.json())
             setNote('')
           } catch (error) {
@@ -426,7 +448,7 @@ window.__ModuleLoader__.load({
       // React plus `fetch` is the whole dependency surface.
       inject: ['slots', 'locale'],
       /** Exposed for the offline smoke test: the colour rules are what can be wrong without looking wrong. */
-      __internals: { classify, toMarkdown, S, MIN_SAMPLE },
+      __internals: { classify, toMarkdown, unwrapReport, S, MIN_SAMPLE },
       apply (ctx) {
         const slots = ctx.slots
         if (slots === undefined || typeof slots.inject !== 'function') return
