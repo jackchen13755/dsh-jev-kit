@@ -411,3 +411,45 @@ test('the automatic lane is narrow, bounded, and off the critical path by defaul
   assert.equal(merge(KIT_DEFAULTS, { autoTriage: 'off' }).autoTriage, 'off')
   assert.equal(merge(KIT_DEFAULTS, { autoTriage: 'nonsense' }).autoTriage, 'shadow', 'an unusable value is ignored, not stored')
 })
+
+test('a late report of "acted on" reaches the report, and stays honest when there is none', () => {
+  /*
+   * The dimension the ledger could not previously answer. Measured before this: `acted`
+   * carried a value on 0 of 1024 judgments — the instrument could prove it fired but
+   * never that it changed anything, which is the difference between a dashboard and a
+   * decoration.
+   *
+   * A gate learns this *after* the fact (it reported a finding, the content changed, and
+   * the next scan came back clean), so the report arrives as its own append-only row
+   * rather than as an edit to the original decision.
+   */
+  const dir = tmp()
+  const now = Date.now()
+  append(dir, { t: now, kind: 'decision', channel: 'private_scan', group: 'P', level: 'flag', values: {}, via: 'jev', ms: 500, chars: 10, session: 'hook' })
+  append(dir, { t: now + 1, kind: 'decision', channel: 'private_scan', group: 'P', level: 'info', values: {}, via: 'jev', ms: 500, chars: 10, session: 'hook' })
+  let report = summarize(load(dir, 1, new Date(now)), 1)
+  let scan = report.channels.find(channel => channel.channel === 'private_scan')
+  assert.equal(scan.acted, 0, 'nothing reported back yet')
+  assert.equal(scan.actedYes, 0)
+  assert.doesNotMatch(render(report), /被采纳/, 'and the report does not claim a loop it does not have')
+
+  append(dir, { t: now + 2, kind: 'acted', channel: 'private_scan', entry: 'hook', note: '上次拦下的内容已改，复扫为 0', acted: true })
+  report = summarize(load(dir, 1, new Date(now)), 1)
+  scan = report.channels.find(channel => channel.channel === 'private_scan')
+  assert.equal(scan.acted, 1, 'the late report counts as a report')
+  assert.equal(scan.actedYes, 1)
+  assert.match(render(report), /被采纳/, 'and the report shows the loop closing')
+  assert.match(render(report), /private_scan` 1\/1/)
+
+  // A report of "was told, did not act" is a report too — and must not read as a yes.
+  append(dir, { t: now + 3, kind: 'acted', channel: 'private_scan', entry: 'hook', acted: false })
+  report = summarize(load(dir, 1, new Date(now)), 1)
+  scan = report.channels.find(channel => channel.channel === 'private_scan')
+  assert.equal(scan.acted, 2)
+  assert.equal(scan.actedYes, 1, 'a shrug is not a fix')
+
+  // The inline path still works: a caller that knew at judgment time.
+  append(dir, { t: now + 4, kind: 'decision', channel: 'log_triage', group: 'C', level: 'info', values: {}, via: 'jev', ms: 100, chars: 10, acted: true })
+  report = summarize(load(dir, 1, new Date(now)), 1)
+  assert.equal(report.channels.find(channel => channel.channel === 'log_triage').actedYes, 1)
+})

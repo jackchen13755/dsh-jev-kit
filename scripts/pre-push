@@ -116,6 +116,34 @@ payload=$(DIFF="$diff" python3 -c 'import json,os; print(json.dumps({"diff": os.
   exit 0
 }
 
+# ── A3：反馈闭环的状态 ─────────────────────────────────────────────────
+#
+# A gate is the one caller that can see whether its advice was taken: it reported a
+# finding, the content changed, and the next scan of the same subject came back clean.
+# That knowledge can only be assembled across two runs, so it is kept in the git dir
+# (never committed) as one line: <channel> <fingerprint of the blocked content>.
+#
+# Reported back through /api/acted, because nobody else can report it: the ledger
+# measured 0 of 1024 judgments carrying an `acted` value, so the report could say the
+# instrument fired but never that it changed anything.
+state_file="$(git rev-parse --git-dir 2>/dev/null)/jev-kit-blocked"
+fingerprint=$(printf '%s' "$diff" | shasum -a 256 2>/dev/null | cut -d' ' -f1 || echo '')
+previous=""
+[ -n "$fingerprint" ] && [ -f "$state_file" ] && previous=$(cut -d' ' -f2- "$state_file" 2>/dev/null | head -1)
+
+# Report "acted" only on the interesting transition: something *was* blocked, the
+# content is *not* the same content any more, and this scan is clean. A re-scan of the
+# identical bytes is not a fix, and a clean first push has nothing to report.
+report_acted () {
+  [ -n "$previous" ] || return 0
+  [ "$previous" = "$fingerprint" ] && return 0
+  curl -sS -m 15 -X POST "${JEV_KIT_ACTED_ENDPOINT:-http://127.0.0.1:3080/dsh-jev-kit/api/acted}" \
+    -H 'content-type: application/json' \
+    -d "$(CH="$1" python3 -c 'import json,os; print(json.dumps({"channel": os.environ["CH"], "entry": "hook", "note": "上次拦下的内容已改，复扫为 0"}))' 2>/dev/null)" \
+    >/dev/null 2>&1 || true
+  echo "jev-kit pre-push: ✓ 上次拦下的内容已修改且复扫干净——记一次「被采纳」（$1）" >&2
+}
+
 # ── 第一层：正则（形状） ───────────────────────────────────────────────
 #
 # Two layers, because they catch different things and the measurements said so:
@@ -145,6 +173,9 @@ if [ -n "$token_hits$path_hits" ]; then
   [ -n "$path_hits" ] && printf '%s\n' "$path_hits" | sed 's/^/    path : /' >&2
   echo "  这是形状匹配，请确认是否为夹具/文档示例。" >&2
   if [ "${JEV_ALLOW_PUSH:-0}" != "1" ]; then
+    # Blocked: remember what was blocked, so a later clean scan of *different* content
+    # can be reported as "the advice was acted on".
+    [ -n "$fingerprint" ] && printf 'private_scan %s\n' "$fingerprint" > "$state_file" 2>/dev/null
     echo "  确认后重推：JEV_ALLOW_PUSH=1 git push" >&2
     exit 1
   fi
@@ -189,16 +220,30 @@ import json, sys
 data = json.load(sys.stdin)
 for why in (data.get("failures") or [])[:5]: print("    · %s" % why, file=sys.stderr)
 ' 2>/dev/null || true
-      [ "$flagged" = "0" ] && exit 0
+      if [ "$flagged" = "0" ]; then
+        report_acted private_scan
+        rm -f "$state_file" 2>/dev/null || true
+        exit 0
+      fi
     fi
-    [ "$flagged" = "0" ] && exit 0
+    if [ "$flagged" = "0" ]; then
+      report_acted private_scan
+      rm -f "$state_file" 2>/dev/null || true
+      exit 0
+    fi
     ;;
   *)
     echo "jev-kit pre-push: ⚠️ 扫描未能完成（$verdict）——本次不阻塞推送，但**这不代表 diff 干净**。" >&2
     exit 0
     ;;
 esac
-if [ "$flagged" = "0" ]; then exit 0; fi
+if [ "$flagged" = "0" ]; then
+  report_acted private_scan
+  rm -f "$state_file" 2>/dev/null || true
+  exit 0
+fi
+# Blocked by the semantic layer: remember this content.
+[ -n "$fingerprint" ] && printf 'private_scan %s\n' "$fingerprint" > "$state_file" 2>/dev/null
 
 echo "" >&2
 printf '%s' "$response" | python3 -c '

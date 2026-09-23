@@ -44,6 +44,17 @@ export type LedgerRecord =
   | { t: number; kind: 'bench'; engines: string[]; fixtures: number }
   | { t: number; kind: 'degraded'; channel: string; reason: string }
   | { t: number; kind: 'error'; channel: string; message: string }
+  /**
+   * Somebody reported, after the fact, whether the advice was acted on.
+   *
+   * A separate row rather than a field set on the decision row, because this file is
+   * append-only by design: the gate that learns "the finding was fixed" learns it on a
+   * *later* push, and rewriting an earlier line to say so would trade an auditable
+   * record for a tidier one. Without any such row the ledger could prove the instrument
+   * fired but never that it changed anything — measured 2026-09-23: `acted` was set on
+   * 0 of 1024 judgments.
+   */
+  | { t: number; kind: 'acted'; channel: string; entry?: string; note?: string; acted: boolean }
 
 export const ledgerFile = (dir: string, when = new Date()): string =>
   path.join(dir, `ledger-${when.toISOString().slice(0, 10)}.jsonl`)
@@ -151,6 +162,8 @@ const mean = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0
 /** Aggregate the ledger by channel — the only honest way to rank this catalogue. */
 export function summarize (records: LedgerRecord[], days: number, usdPerMTok = 0.042): KitReport {
   const decisions = records.filter((r): r is Extract<LedgerRecord, { kind: 'decision' }> => r.kind === 'decision')
+  /** Late reports, from a caller that could only know afterwards (a push gate, mostly). */
+  const actedReports = records.filter((r): r is Extract<LedgerRecord, { kind: 'acted' }> => r.kind === 'acted')
   const byChannel = new Map<string, Extract<LedgerRecord, { kind: 'decision' }>[]>()
   for (const row of decisions) {
     const list = byChannel.get(row.channel) ?? []
@@ -170,8 +183,10 @@ export function summarize (records: LedgerRecord[], days: number, usdPerMTok = 0
       level: verdictOf({ n, flagged, warn }),
       cached: rows.filter(r => r.via === 'cache').length,
       latency: percentiles(rows.map(r => r.ms ?? 0).filter(ms => ms > 0)),
-      acted: rows.filter(r => r.acted !== undefined).length,
-      actedYes: rows.filter(r => r.acted === true).length,
+      // Two ways to learn it: the caller said so at judgment time (`acted` on the
+      // decision row), or a later report said so (an `acted` marker row). Same question.
+      acted: rows.filter(r => r.acted !== undefined).length + actedReports.filter(r => r.channel === channel).length,
+      actedYes: rows.filter(r => r.acted === true).length + actedReports.filter(r => r.channel === channel && r.acted !== false).length,
     }
   }).sort((a, b) => b.n - a.n)
 
@@ -237,6 +252,15 @@ export function render (report: KitReport): string {
     report.health.degraded || report.health.errors
       ? `⚠️ 降级 ${report.health.degraded} · 失败 ${report.health.errors}（失败永远不记成"没问题"）`
       : '无降级、无失败',
+    '',
+    /*
+     * Rendered only when there is something to say: a permanent "acted 0/0" line trains
+     * the reader to ignore it, and this dimension is usually empty for an honest reason
+     * (nobody reports back) rather than a good one.
+     */
+    report.channels.some(channel => channel.acted > 0)
+      ? `被采纳：${report.channels.filter(channel => channel.acted > 0).map(channel => `\`${channel.channel}\` ${channel.actedYes}/${channel.acted}`).join(' · ')} —— 由调用方回填（"它响了"和"有人照做"是两件事）`
+      : '',
     '',
     report.byEntry.length
       ? `按入口：${report.byEntry.map(row => `\`${row.entry}\`×${row.n}${row.flag ? `(⛔${row.flag})` : ''}`).join(' · ')} —— **没有入口的通道永远是 0，无论问句写得多好**`

@@ -50,6 +50,24 @@ export type LedgerRecord = {
     kind: 'error';
     channel: string;
     message: string;
+}
+/**
+ * Somebody reported, after the fact, whether the advice was acted on.
+ *
+ * A separate row rather than a field set on the decision row, because this file is
+ * append-only by design: the gate that learns "the finding was fixed" learns it on a
+ * *later* push, and rewriting an earlier line to say so would trade an auditable
+ * record for a tidier one. Without any such row the ledger could prove the instrument
+ * fired but never that it changed anything — measured 2026-09-23: `acted` was set on
+ * 0 of 1024 judgments.
+ */
+ | {
+    t: number;
+    kind: 'acted';
+    channel: string;
+    entry?: string;
+    note?: string;
+    acted: boolean;
 };
 export declare const ledgerFile: (dir: string, when?: Date) => string;
 /** Append one row. Best-effort by design: measurement never breaks a task. */

@@ -1049,7 +1049,33 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                 cache = createCache<{ verdict: Verdict, ms: number }>(config.cacheMaxEntries, config.cacheTtlMs)
                 setThresholdOverrides(config.thresholds)
                 setReaderThresholds(config.thresholds)
-                send(res, 200, { ok: true, settings: { enabled: config.enabled, maxItems: config.maxItems, requestTimeoutMs: config.requestTimeoutMs, callBudgetMs: config.callBudgetMs, concurrency: config.concurrency, cacheTtlMs: config.cacheTtlMs, thresholds: thresholdOverrides() } })
+                /*
+                 * Echo what is now in force, and echo all of it.
+                 *
+                 * A patch endpoint that returns a partial echo leaves the caller guessing
+                 * which of its keys landed — and this one silently *replaced* the
+                 * thresholds map before the merge fix, so "did my other cuts survive"
+                 * was a question only this response could answer. The lane and routing
+                 * knobs are here for the same reason.
+                 */
+                send(res, 200, {
+                  ok: true,
+                  settings: {
+                    enabled: config.enabled,
+                    maxItems: config.maxItems,
+                    requestTimeoutMs: config.requestTimeoutMs,
+                    callBudgetMs: config.callBudgetMs,
+                    concurrency: config.concurrency,
+                    foregroundTimeoutMs: config.foregroundTimeoutMs,
+                    foregroundConcurrency: config.foregroundConcurrency,
+                    autoTriage: config.autoTriage,
+                    autoChannels: config.autoChannels,
+                    autoMaxPerSession: config.autoMaxPerSession,
+                    engineByChannel: config.engineByChannel,
+                    cacheTtlMs: config.cacheTtlMs,
+                    thresholds: thresholdOverrides(),
+                  },
+                })
                 return
               }
               if (req.method === 'POST' && route === 'i18n-check') {
@@ -1192,6 +1218,31 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                 const result = await runUnits('private_scan', units, 'card')
                 const findings = result.items.filter(item => item.verdict.level === 'flag').map(item => ({ where: item.where, headline: item.verdict.headline, values: item.verdict.values }))
                 send(res, 200, { ok: true, repo, units: result.items.length, flagged: findings.length, findings, markdown: renderCall(result) })
+                return
+              }
+              if (req.method === 'POST' && route === 'acted') {
+                /*
+                 * The feedback loop's only entry.
+                 *
+                 * A gate is the one caller that can observe whether its advice was taken:
+                 * it reported a finding, the content changed, and the next scan of the
+                 * same subject came back clean. Without this route that knowledge died
+                 * with the shell process, and the report could only ever answer "it
+                 * fired" — measured 2026-09-23: `acted` carried a value on 0 of 1024
+                 * judgments, so the instrument could not tell a fix from a shrug.
+                 */
+                const body = await readBody(req) as { channel?: string, entry?: string, note?: string, acted?: boolean }
+                const channel = channelOf(String(body?.channel ?? ''))
+                if (!channel) { send(res, 400, { ok: false, error: '需要已知的 channel' }); return }
+                append(ledgerDir, {
+                  t: Date.now(),
+                  kind: 'acted',
+                  channel: channel.id,
+                  entry: typeof body?.entry === 'string' ? body.entry.slice(0, 60) : 'unknown',
+                  note: typeof body?.note === 'string' ? body.note.slice(0, 200) : undefined,
+                  acted: body?.acted !== false,
+                })
+                send(res, 200, { ok: true })
                 return
               }
               if (req.method === 'POST' && route === 'scan-private') {
