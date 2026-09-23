@@ -482,3 +482,78 @@ test('a commit bigger than one request is judged per hunk, not truncated and not
   assert.ok(small.length <= MAX_UNIT_CHARS)
   assert.equal(hunksOf(small, 40).length, 1)
 })
+
+test('通道形态决定它需要什么字段，而脚本必须能问 input 类通道', () => {
+  /*
+   * The gap this pins: `/api/triage` accepted only `per: 'item'` channels, so the two
+   * channels a *script* most needs — `pick` ("act on which candidate") and `sufficient`
+   * ("is this enough to stop") — were exactly the two it could not reach. A browser
+   * driver had no door to them at all (measured: HTTP 400).
+   *
+   * And the fields differ by shape, which is how the first version of the fix rejected a
+   * well-formed `pick` call: `pick` never reads `text`, it reads `candidates` + `task`.
+   */
+  assert.equal(channelOf('pick')?.per, 'input', 'pick is an input channel, not item')
+  assert.equal(channelOf('sufficient')?.per, 'input')
+  assert.equal(channelOf('private_scan')?.per, 'item', 'and the scan is item-shaped')
+
+  // `pick` reads candidates against the task, and carries a mandatory no-match exit so a
+  // closed-set question can never be answered with a wrong member of the set.
+  const pickState = { text: '', task: '提交这个表单', candidates: ['role=button name="取消"', 'role=button name="提交"'], candidateNoun: '可点击元素' }
+  const pick = channelOf('pick')
+  assert.ok(pick, 'pick exists')
+  const ask = pick.questions(pickState)
+  const keys = Object.keys(ask)
+  assert.equal(keys.length, 1, 'pick asks exactly one question')
+  assert.equal(ask.best.type, 'choice', 'a closed-set question, not a score — scoring has no separation (measured)')
+  const criteria = Object.keys(ask.best.criteria)
+  assert.ok(criteria.length >= 3, 'two candidates + the mandatory no-match option')
+  assert.ok(criteria.includes('none_of_these'), 'the escape hatch is always offered')
+
+  // `sufficient` reads `text` (the results) against `task`, and is deliberately
+  // conservative: it needs covered >= 0.8 AND missing < 0.5 before it says stop.
+  const sufficiency = channelOf('sufficient')
+  assert.ok(sufficiency, 'sufficient exists')
+  // Answers arrive in the engine's own envelope (`{ noul: <score> }`), which is what the
+  // reader unwraps — passing bare numbers silently reads `undefined` and looks like
+  // "keep going", so the shape is part of the contract.
+  const noul = (value) => ({ noul: value })
+  assert.equal(sufficiency.read({ answers: noul(0.9), missing: noul(0.1) }, {}).level, 'ok')
+  assert.equal(sufficiency.read({ answers: noul(0.9), missing: noul(0.6) }, {}).level, 'info', 'a missing piece keeps it going')
+  assert.equal(sufficiency.read({ answers: noul(0.5), missing: noul(0.1) }, {}).level, 'info', 'half-covered is not enough')
+})
+
+test('page_state answers with the next move, and never guesses a page it cannot read', () => {
+  /*
+   * The browser driver's highest-frequency fork. A label alone is not enough — the point
+   * of asking is to decide what to do next, so every state carries a `next` the caller
+   * can branch on. And it is a closed-set `choice`, never a score: the family measured
+   * that scoring real text has no separation (36 segments crammed into 0.02–0.66), while
+   * 1-of-N selection is clean.
+   */
+  const channel = channelOf('page_state')
+  assert.ok(channel, 'the channel exists')
+  assert.equal(channel.per, 'input')
+  const question = channel.questions({ text: 'SNAPSHOT', task: 'TASK' }).state
+  assert.equal(question.type, 'choice', 'a choice, not a score')
+  const options = Object.keys(question.criteria)
+  for (const state of ['login', 'target', 'shell', 'error', 'blocked', 'unknown']) {
+    assert.ok(options.includes(state), `${state} is offered`)
+  }
+  assert.ok(options.includes('unknown'), 'and "cannot tell" is always available, so a bad snapshot cannot force a wrong state')
+
+  // Each state maps to a next move — including the pair that is expensive to confuse.
+  const at = (state) => channel.read({ state: { choice: state } }, {})
+  assert.equal(at('target').values.next, 'proceed')
+  assert.equal(at('target').level, 'ok')
+  assert.equal(at('shell').values.next, 'wait', 'still loading is not broken: wait, do not retry')
+  assert.equal(at('error').values.next, 'inspect', 'broken is not slow: inspect, do not wait')
+  assert.equal(at('login').values.next, 'reauthenticate')
+  assert.equal(at('blocked').values.next, 'hand_to_human', 'captcha/2FA must never be brute-forced')
+  assert.equal(at('unknown').values.next, 'snapshot_more')
+  // Anything that is not the target page needs a human look — the run is off-plan.
+  for (const state of ['login', 'error', 'blocked']) assert.equal(at(state).level, 'flag', `${state} is flagged`)
+  // An unrecognised answer is treated as "cannot tell", not as the target page.
+  assert.equal(channel.read({ state: { choice: 'nonsense' } }, {}).values.next, 'snapshot_more')
+  assert.equal(channel.read({}, {}).values.next, 'snapshot_more')
+})

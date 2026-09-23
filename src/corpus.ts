@@ -500,8 +500,42 @@ function pickFixtures (): Fixture[] {
   }))
 }
 
+/*
+ * `page_state` — the browser driver's highest-frequency fork: which page am I actually
+ * on, and what does that mean for the next move. Truth by construction: each case is a
+ * snapshot whose identity is decided by what was composed into it (a credential form,
+ * a spinner with no data, a 5xx body), never by a judgement call afterwards.
+ *
+ * Both directions are represented, including the pairs that are expensive to confuse:
+ * `shell` (still loading) vs `error` (broken) — retrying one and waiting on the other
+ * are the two classic ways a driver burns its budget.
+ */
+const PAGE_CASES: Array<{ id: string, state: string, snapshot: string, truth: string }> = [
+  { id: 'page_target', state: 'target', truth: '目标内容已渲染、控件就位', snapshot: '订单详情\n订单号 A-1029 金额 ¥128.00 状态 已支付\n[role=button name="重新下单"] [role=button name="申请退款"]' },
+  { id: 'page_login', state: 'login', truth: '凭据表单（未登录）', snapshot: '登录\n请使用企业账号登录\n工号 [role=textbox name="工号"]\n密码 [role=textbox name="密码"]\n[role=button name="登录"]' },
+  { id: 'page_session', state: 'login', truth: '会话过期要求重新登录', snapshot: 'Your session has expired. Please sign in again to continue.\n[role=button name="Sign in"]' },
+  { id: 'page_shell', state: 'shell', truth: '只有框架与加载态，数据未到', snapshot: '订单详情\n[spinner] 加载中…\n[skeleton][skeleton][skeleton]' },
+  { id: 'page_error', state: 'error', truth: '5xx 错误体', snapshot: '500 Internal Server Error\nSomething went wrong on our side. Request ID: 8f2a-11' },
+  { id: 'page_forbidden', state: 'error', truth: '403 权限不足', snapshot: '403 Forbidden — 你没有权限查看该订单' },
+  { id: 'page_captcha', state: 'blocked', truth: '需要人工完成滑块验证', snapshot: '请完成安全验证\n拖动滑块完成拼图 [role=slider]' },
+  { id: 'page_2fa', state: 'blocked', truth: '需要人工输入 2FA 验证码', snapshot: '两步验证\n请输入手机收到的 6 位验证码 [role=textbox]' },
+  { id: 'page_consent', state: 'blocked', truth: '条款/隐私墙挡在前面', snapshot: 'We value your privacy. Accept all cookies to continue.\n[role=button name="Accept all"]' },
+  { id: 'page_partial', state: 'unknown', truth: '快照过少，无法判断（不猜）', snapshot: '[role=banner name="导航"]' },
+]
+
+function pageFixtures (): Fixture[] {
+  return PAGE_CASES.map(item => ({
+    id: item.id,
+    channel: 'page_state',
+    truth: item.truth,
+    expect: { kind: 'choice' as const, field: 'state', equals: item.state },
+    state: { text: item.snapshot, task: '读取订单 A-1029 的金额' },
+  }))
+}
+
 export const CORPUS: Fixture[] = [
   ...privacyFixtures(),
+  ...pageFixtures(),
   ...rankingFixtures(),
   ...pickFixtures(),
   ...commandFixtures(),

@@ -702,6 +702,70 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     },
   },
 
+  page_state: {
+    id: 'page_state',
+    group: 'C',
+    title: '当前页面处于哪个状态（导航后先问这个）',
+    intent: '浏览器自动化的高频岔口：登录页 / 空壳 SPA / 错误页 / 目标页 / 需要人工验证 —— 一次闭集判定决定"下一步该干什么"，避免对着错误页面瞎点',
+    per: 'input',
+    /*
+     * 0.5 是声称"这是目标页"所需的把握。给低了会把登录页/错误页误认成目标页，而这一步
+     * 之后的所有动作都建立在它上面；给高了会把慢渲染的目标页判成"未知"从而反复等待。
+     */
+    at: 0.5,
+    questions: () => ({
+      /*
+       * 闭集选择，**不是打分**。同族实测：让模型对"相关性"打分时，36 段真实文本挤在
+       * 0.02–0.66 毫无分离度；而给一组具名选项做 1-of-N 选择，判别是干净的。页面状态
+       * 天然是有限集，所以这里用 `choice`，并且**必须**带一个出口，否则模型会在候选都
+       * 不对时硬选一个 —— 一个被认错的页面比一个"我不知道"贵得多。
+       */
+      state: choice('Which single state is the page in `text` actually in right now? Judge only from what `text` shows; choose unknown if it does not clearly show one of them.', {
+        login: 'a login / sign-in page (credential form, single sign-on redirect, "session expired"): the user is not authenticated',
+        target: 'the page the `task` needs, with its real content rendered and its controls present',
+        shell: 'an empty or skeletal shell: the application frame loaded but its data has not arrived (spinners, skeletons, "loading…", empty containers)',
+        error: 'an error page or an error state (4xx/5xx, stack trace, "something went wrong", permission denied, not found)',
+        blocked: 'a human-verification or consent interstitial: captcha, 2FA prompt, cookie/terms wall, "verify you are human"',
+        unknown: 'none of the above is clear from `text` (e.g. the snapshot is too partial to judge)',
+      }),
+    }),
+    read: answers => {
+      const state = pickOf(answers, 'state') ?? 'unknown'
+      /*
+       * Each state maps to the *next move*, not just a label: the point of asking is to
+       * decide what the driver does next, and a label alone leaves that decision to
+       * guesswork at the call site.
+       *
+       * `level` follows the family's vocabulary — `flag` means a human should look at
+       * this, which is true for every state that is not the target page (the run is
+       * about to do something other than what it planned).
+       */
+      const move: Record<string, { level: 'ok' | 'warn' | 'flag', next: string }> = {
+        target: { level: 'ok', next: 'proceed' },
+        shell: { level: 'warn', next: 'wait' },
+        login: { level: 'flag', next: 'reauthenticate' },
+        error: { level: 'flag', next: 'inspect' },
+        blocked: { level: 'flag', next: 'hand_to_human' },
+        unknown: { level: 'warn', next: 'snapshot_more' },
+      }
+      const chosen = move[state] ?? move.unknown as { level: 'ok' | 'warn' | 'flag', next: string }
+      const labels: Record<string, string> = {
+        target: '目标页（内容与控制都在）',
+        shell: '空壳（框架在、数据未到）',
+        login: '登录页/会话过期',
+        error: '错误页/错误态',
+        blocked: '需要人工验证（验证码/2FA/条款墙）',
+        unknown: '无法判断',
+      }
+      return {
+        level: chosen.level,
+        headline: `${labels[state] ?? state} → ${chosen.next}`,
+        details: [`state=${state}`, `next=${chosen.next}`],
+        values: { state, next: chosen.next },
+      }
+    },
+  },
+
   pick: {
     id: 'pick',
     group: 'C',

@@ -1123,19 +1123,89 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                  * Advisory channels only: this route never blocks anything, it returns a
                  * verdict for the caller to show.
                  */
-                const body = await readBody(req) as { channel?: string, items?: string[], context?: string, task?: string }
+                const body = await readBody(req) as {
+                  channel?: string
+                  items?: string[]
+                  text?: string
+                  task?: string
+                  context?: string
+                  candidates?: string[]
+                  candidateNoun?: string
+                  requirements?: string[]
+                }
                 const channel = channelOf(typeof body?.channel === 'string' ? body.channel : '')
                 if (!channel) { send(res, 400, { ok: false, error: `未知通道：${JSON.stringify(body?.channel)}` }); return }
-                if (channel.per !== 'item') { send(res, 400, { ok: false, error: `通道 ${channel.id} 不是逐条判定，请用 items 传一条整体输入` }); return }
+                const session = typeof body?.context === 'string' && body.context ? body.context : 'tool'
+                const strings = (value: unknown, cap: number): string[] | undefined =>
+                  Array.isArray(value) ? value.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).slice(0, cap) : undefined
+
+                if (channel.per === 'input') {
+                  /*
+                   * The `per: 'input'` channels — `pick` and `sufficient` among them.
+                   *
+                   * They used to be reachable only from a tool call, which left the two
+                   * decisions a *script* most needs answered ("act on which candidate",
+                   * "is this enough to stop") as the two it could not ask at all: a
+                   * browser driver had no door to them. `text` is the field every one of
+                   * these channels reads; the rest are the optional ones (`pick` needs
+                   * `candidates` + `candidateNoun`; `sufficient` reads `text` against
+                   * `task`).
+                   */
+                  const candidates = strings(body?.candidates, 60)
+                  const text = typeof body?.text === 'string' && body.text.trim()
+                    ? body.text
+                    : (Array.isArray(body?.items) ? body.items.filter((x): x is string => typeof x === 'string').join('\n') : '')
+                  /*
+                   * Required fields differ by channel, and demanding the wrong one is how
+                   * this first shipped broken: `pick` asks "which of these candidates"
+                   * and never reads `text` at all, so requiring `text` rejected a
+                   * perfectly well-formed `pick` call. `text` is what the rest read.
+                   */
+                  if (channel.id === 'pick' ? !candidates?.length : !text.trim()) {
+                    send(res, 400, {
+                      ok: false,
+                      error: channel.id === 'pick'
+                        ? 'pick 需要 candidates（≤60 条），可另给 task 说明目标'
+                        : '该通道需要 text（或 items 拼成一段）',
+                    })
+                    return
+                  }
+                  const result = await runInput(channel.id, {
+                    text,
+                    task: typeof body?.task === 'string' ? body.task : undefined,
+                    candidates,
+                    candidateNoun: typeof body?.candidateNoun === 'string' ? body.candidateNoun : undefined,
+                    requirements: strings(body?.requirements, 60),
+                  }, session)
+                  const first = result.items[0]
+                  send(res, 200, {
+                    ok: true,
+                    channel: channel.id,
+                    units: result.items.length,
+                    flagged: result.items.filter(item => item.verdict.level === 'flag' || item.verdict.level === 'warn').length,
+                    failed: result.degraded,
+                    failures: result.errors,
+                    /* The verdict itself, so a caller can act without parsing prose. */
+                    level: first?.verdict.level ?? null,
+                    headline: first?.verdict.headline ?? null,
+                    values: first?.verdict.values ?? null,
+                    findings: result.items.map(item => ({ where: item.where, level: item.verdict.level, headline: item.verdict.headline, values: item.verdict.values })),
+                    markdown: renderCall(result),
+                  })
+                  return
+                }
+
                 const items = (Array.isArray(body?.items) ? body.items : []).filter((x): x is string => typeof x === 'string' && x.trim().length > 0).slice(0, config.maxItems)
-                if (!items.length) { send(res, 400, { ok: false, error: 'items 为空' }); return }
+                if (!items.length) { send(res, 400, { ok: false, error: 'items 为空（逐条判定通道需要 items）' }); return }
                 const units = items.map((text, index) => ({ text, where: items.length > 1 ? `#${index + 1}` : '' }))
-                const result = await runUnits(channel.id, units, typeof body?.context === 'string' && body.context ? body.context : 'tool', { task: body?.task })
+                const result = await runUnits(channel.id, units, session, { task: body?.task })
                 send(res, 200, {
                   ok: true,
                   channel: channel.id,
                   units: result.items.length,
                   flagged: result.items.filter(item => item.verdict.level === 'flag').length,
+                  failed: result.degraded,
+                  failures: result.errors,
                   findings: result.items.map(item => ({ where: item.where, level: item.verdict.level, headline: item.verdict.headline, values: item.verdict.values })),
                   markdown: renderCall(result),
                 })
@@ -1184,11 +1254,30 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
                  * skipped, never dropped silently). The single-request path stays for the
                  * ordinary case, where the question really is about the diff as a whole.
                  */
-                const result = diff.length <= MAX_UNIT_CHARS
-                  ? await runInput('commit_message', { text: message, other: diff }, 'commit-msg')
-                  : await runUnits('commit_message', hunksOf(diff, config.maxItems), 'commit-msg', {}, unit => ({ text: message, other: unit.text }))
-                const flagged = result.items.some(item => item.verdict.level === 'warn' || item.verdict.level === 'flag')
-                send(res, 200, { ok: true, flagged: flagged ? 1 : 0, failed: result.degraded, failures: result.errors, findings: flagged ? result.items.map(item => ({ where: item.where ?? '', headline: item.verdict.headline, values: item.verdict.values })) : [], markdown: renderCall(result) })
+                const split = diff.length > MAX_UNIT_CHARS
+                const result = split
+                  ? await runUnits('commit_message', hunksOf(diff, config.maxItems), 'commit-msg', {}, unit => ({ text: message, other: unit.text }))
+                  : await runInput('commit_message', { text: message, other: diff }, 'commit-msg')
+                /*
+                 * Aggregate by **majority**, not by "any".
+                 *
+                 * The channel's two questions are about the change *as a whole* ("does the
+                 * message describe what the diff actually changes"). Splitting that question
+                 * across hunks is a token-limit workaround, not a change of meaning — but
+                 * the first version of it used `some(...)`, so a single hunk whose local
+                 * edit is a reworded error string counted as "the message does not describe
+                 * the diff". Measured on a real commit: 3 of 10 hunks scored matches
+                 * 0.12–0.24 purely because the message describes intent, not each line.
+                 *
+                 * A majority keeps the check honest — a message that genuinely misses the
+                 * change will fail most of its hunks — while not manufacturing a finding
+                 * out of the grain mismatch between "what changed" and "why".
+                 */
+                const off = result.items.filter(item => item.verdict.level === 'warn' || item.verdict.level === 'flag')
+                const flagged = split
+                  ? off.length * 2 > result.items.length
+                  : off.length > 0
+                send(res, 200, { ok: true, flagged: flagged ? 1 : 0, failed: result.degraded, failures: result.errors, findings: off.map(item => ({ where: item.where ?? '', level: item.verdict.level, headline: item.verdict.headline, values: item.verdict.values })), markdown: renderCall(result) })
                 return
               }
               if (req.method === 'POST' && route === 'key') {
