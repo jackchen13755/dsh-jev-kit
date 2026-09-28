@@ -149,9 +149,21 @@ window.__ModuleLoader__.load({
         colN: '次数',
         colFlag: '⛔',
         colWarn: '⚠️',
+        colCached: '缓存',
+        colActed: '采纳',
         colP50: 'p50',
         colP95: 'p95',
-        legend: '🔴 有命中（去看它抓到了什么）· 🟡 只有 warn（观察）· ⬛ 样本够了却从未非中性（淘汰或改问句——本表唯一的行动项）· ⚪ 样本不足（不表态）',
+        legend: '🔴 有命中（去看它抓到了什么）· 🟡 只有 warn（观察）· ⬛ 样本够了却从未非中性（淘汰或改问句——本表唯一的行动项）· ⚪ 样本不足（不表态）· 缓存 = 同输入重复问时省下的调用 · 采纳 = 判定被真正用上的比例（**只有调用方回填才知道，没回填显示「未回填」而不是 0%**）',
+        effect: '执行效果（这个插件到底干了什么）',
+        effectTotals: (o) => `${o.total} 次判定 · 账本窗口 ${o.days} 天共 ${o.records} 行`,
+        effectCost: (o) => `花费**估算** $${o.usd}（${o.inputTokens} 输入 token，按字符数 ÷ 4 估的，不是实测）· 缓存省下 ${o.savedCalls} 次调用`,
+        effectHealthOk: '✅ 没有降级、没有出错',
+        effectHealth: (o) => `⚠️ 降级 ${o.degraded} 次（= **没有判定就放行了**，fail-open；不等于"没问题"）· 出错 ${o.errors} 次`,
+        byEntry: '谁在调用（入口分布）',
+        byEntryNone: '还没有判定——所以这里也没有入口',
+        unused: '从未触发的通道（与 ⬛ 是一对：零调用 vs 从不表态，都是退役候选）',
+        unusedNone: '无（每个通道都被调用过）',
+        actedNotReported: '未回填',
         colFit: '调整',
         fitLegend: '🟢 可调整（分离度够 + 留出折上收益 > 2 点）· ⚪ 无需改动（现值已接近留出折最优）· ⬛ 不可拟合（分离度 < 0.75，照改就是过拟合）',
         axisNote: '按轴刀口（优先于通道级，且应用建议时会保留）',
@@ -221,9 +233,21 @@ window.__ModuleLoader__.load({
         colN: 'n',
         colFlag: '⛔',
         colWarn: '⚠️',
+        colCached: 'cached',
+        colActed: 'acted',
         colP50: 'p50',
         colP95: 'p95',
-        legend: '🔴 found things (go read what it caught) · 🟡 warnings only (watch) · ⬛ enough samples, never non-neutral (retire or reword — the only action item) · ⚪ too few samples (no verdict)',
+        legend: '🔴 found things (go read what it caught) · 🟡 warnings only (watch) · ⬛ enough samples, never non-neutral (retire or reword — the only action item) · ⚪ too few samples (no verdict) · cached = calls saved by answering the same input again · acted = share of verdicts actually used (**only known when the caller reports back, so an un-reported channel says "not reported", never 0%**)',
+        effect: 'Effect (what this plugin actually did)',
+        effectTotals: (o) => `${o.total} judgments · ledger window ${o.days}d, ${o.records} rows`,
+        effectCost: (o) => `**estimated** cost $${o.usd} (${o.inputTokens} input tokens, chars ÷ 4 — an estimate, not a measurement) · cache saved ${o.savedCalls} calls`,
+        effectHealthOk: '✅ no degradations, no errors',
+        effectHealth: (o) => `⚠️ ${o.degraded} degradation(s) — **no judgment was made and the call went through** (fail-open, which is not the same as "nothing found") · ${o.errors} error(s)`,
+        byEntry: 'Who is calling it (entry points)',
+        byEntryNone: 'no judgments yet — so no entry points either',
+        unused: 'Channels never triggered (the partner of ⬛: zero calls vs never spoke up — both are retirement candidates)',
+        unusedNone: 'none (every channel has been called)',
+        actedNotReported: 'not reported',
         colFit: 'adjust',
         fitLegend: '🟢 adjustable (separated + > 2 points gained on the held-out folds) · ⚪ no change needed (already near the held-out optimum) · ⬛ not fittable (separation < 0.75: following it is overfitting)',
         axisNote: 'per-axis cut (wins over the channel-level one, and an apply preserves it)',
@@ -305,13 +329,53 @@ window.__ModuleLoader__.load({
         // Prefer the host's verdict; recompute only when the payload has none.
         const level = HOST_LEVEL[row.level] ?? (flagged > 0 ? 'bad' : warn > 0 ? 'warn' : n >= MIN_SAMPLE ? 'retire' : 'unknown')
         const label = level === 'bad' ? t.verdictUseful : level === 'warn' ? t.verdictWarn : level === 'retire' ? t.verdictRetire : t.verdictThin
-        return { channel: row.channel, group: row.group ?? '?', n, flagged, warn, p50: row.latency?.p50 ?? 0, p95: row.latency?.p95 ?? 0, level, mark: MARK[level], label }
+        /*
+         * `cached` and `acted` are what separate "it ran" from "it mattered": a judgment
+         * served from cache cost nothing, and one nobody acted on is a verdict with no
+         * effect. `acted` is only known when the caller reports back, so 0 means "not
+         * reported" — which is a different, much milder claim than "0% adopted", and the
+         * card must not print the strong one.
+         */
+        return {
+          channel: row.channel,
+          group: row.group ?? '?',
+          n,
+          flagged,
+          warn,
+          cached: Number(row.cached ?? 0),
+          acted: Number(row.acted ?? 0),
+          actedYes: Number(row.actedYes ?? 0),
+          p50: row.latency?.p50 ?? 0,
+          p95: row.latency?.p95 ?? 0,
+          level,
+          mark: MARK[level],
+          label,
+        }
       })
       const retire = rows.filter((row) => row.level === 'retire').length
       const total = Number(report?.total ?? 0)
-      if (!total) return { level: 'unknown', text: t.noRecords, rows, retire: 0 }
-      if (retire) return { level: 'warn', text: t.retireHead(retire), rows, retire }
-      return { level: 'ok', text: t.healthy, rows, retire: 0 }
+      /*
+       * The window's headline numbers, read straight off `summarize()` (`ledger.ts`).
+       * They were always in the payload — the card simply never showed them, so "is this
+       * plugin doing anything at all" could only be answered by opening the ledger by hand.
+       */
+      const overview = {
+        total,
+        records: Number(report?.window?.records ?? 0),
+        days: Number(report?.window?.days ?? 0),
+        usd: Number(report?.cost?.usd ?? 0),
+        inputTokens: Number(report?.cost?.inputTokens ?? 0),
+        savedCalls: Number(report?.cost?.savedCalls ?? 0),
+        degraded: Number(report?.health?.degraded ?? 0),
+        errors: Number(report?.health?.errors ?? 0),
+        entries: Array.isArray(report?.byEntry)
+          ? report.byEntry.map((entry) => ({ entry: String(entry?.entry ?? '?'), n: Number(entry?.n ?? 0), flag: Number(entry?.flag ?? 0) }))
+          : [],
+        unused: Array.isArray(report?.unusedChannels) ? report.unusedChannels.map(String) : [],
+      }
+      if (!total) return { level: 'unknown', text: t.noRecords, rows, retire: 0, overview }
+      if (retire) return { level: 'warn', text: t.retireHead(retire), rows, retire, overview }
+      return { level: 'ok', text: t.healthy, rows, retire: 0, overview }
     }
 
     /**
@@ -441,6 +505,7 @@ window.__ModuleLoader__.load({
         }
 
         const verdict = classify(report, t)
+        const overview = verdict.overview
         const keyConfigured = status?.key?.configured === true
         const rows = verdict.rows
         /** The apply-ready cuts that would really move something (often none — see `thresholdChanges`). */
@@ -461,6 +526,33 @@ window.__ModuleLoader__.load({
           h('span', { style: muted }, `${t.budget} ${status?.budget?.dayCalls ?? 0}/${status?.budget?.dailyCallLimit ?? '—'}`)))
 
         if (status !== null && !keyConfigured) children.push(h('div', { key: 'nokey', style: { fontSize: '12px', color: TONE.warn } }, t.keyMissing))
+
+        /*
+         * 「执行效果」— the answer to "is this plugin doing anything", before any of the
+         * detail. Every number comes from `GET /api/report` (`summarize()`), which the card
+         * had been receiving and discarding: without this, the only way to tell a working
+         * plugin from an idle one was to read the ledger by hand.
+         *
+         * Two of them are deliberately loud rather than tidy:
+         *   · `degraded` is printed in the warning tone because a degradation means **no
+         *     judgment happened** — reading fail-open as "nothing found" is the exact
+         *     mistake this instrument exists to prevent;
+         *   · the cost is labelled an estimate, because tokens are not recorded per row
+         *     (the host derives them from character counts) and a fabricated-precision
+         *     dollar figure is worse than an honest approximation.
+         */
+        children.push(h('div', { key: 'effect', style: divider },
+          h('div', { style: label }, t.effect),
+          h('div', null, t.effectTotals(overview)),
+          h('div', { style: muted }, t.effectCost(overview)),
+          h('div', { style: overview.degraded || overview.errors ? { fontSize: '12px', color: TONE.warn } : muted },
+            overview.degraded || overview.errors ? t.effectHealth(overview) : t.effectHealthOk),
+          h('div', { style: label }, t.byEntry),
+          h('div', { style: muted }, overview.entries.length
+            ? overview.entries.map((entry) => `${entry.entry} ${entry.n}${entry.flag ? `（⛔${entry.flag}）` : ''}`).join(' · ')
+            : t.byEntryNone),
+          h('div', { style: label }, t.unused),
+          h('div', { style: muted }, overview.unused.length ? overview.unused.join(' · ') : t.unusedNone)))
 
         children.push(h('div', { key: 'credential', style: divider },
           h('div', { style: label }, t.credentials),
@@ -534,6 +626,8 @@ window.__ModuleLoader__.load({
               h('th', { style: cellNum }, t.colN),
               h('th', { style: cellNum }, t.colFlag),
               h('th', { style: cellNum }, t.colWarn),
+              h('th', { style: cellNum }, t.colCached),
+              h('th', { style: cellNum }, t.colActed),
               h('th', { style: cellNum }, t.colP50),
               h('th', { style: cellNum }, t.colP95))),
             h('tbody', null, ...(rows.length
@@ -544,9 +638,16 @@ window.__ModuleLoader__.load({
                 h('td', { style: cellNum }, entry.n),
                 h('td', { style: cellNum }, entry.flagged),
                 h('td', { style: cellNum }, entry.warn),
+                h('td', { style: cellNum }, entry.cached),
+                /*
+                 * `0` is not "0% adopted" — it is "nobody reported back", which is the
+                 * normal state for an advisory tool nobody wired a feedback loop into.
+                 * Printing 0% there would accuse every channel of being ignored.
+                 */
+                h('td', { style: cellNum }, entry.acted === 0 ? t.actedNotReported : `${entry.actedYes}/${entry.acted}`),
                 h('td', { style: cellNum }, `${entry.p50}ms`),
                 h('td', { style: cellNum }, `${entry.p95}ms`)))
-              : [h('tr', { key: 'empty' }, h('td', { style: { ...cell, opacity: 0.7 }, colSpan: 8 }, t.empty))]))),
+              : [h('tr', { key: 'empty' }, h('td', { style: { ...cell, opacity: 0.7 }, colSpan: 10 }, t.empty))]))),
           h('div', { style: muted }, t.legend)))
 
         children.push(h('div', { key: 'skips', style: divider },

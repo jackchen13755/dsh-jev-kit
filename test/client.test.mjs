@@ -578,6 +578,94 @@ test('the card shows how well a score reads as a probability, and never invents 
   }
 })
 
+test('the card shows what the plugin actually did, not just per-channel counts', async () => {
+  /*
+   * Every number here was already arriving in `GET /api/report` and being discarded, so
+   * "is this plugin doing anything" could only be answered by reading the ledger by hand.
+   * Two of them are honesty rules rather than decoration, and both are asserted:
+   *
+   *   · a **degradation** means no judgment was made (fail-open) — printing it as a bare
+   *     count, or worse letting it read as "nothing found", is the mistake this family
+   *     exists to prevent;
+   *   · a **cost** derived from characters ÷ 4 must say it is an estimate; a precise
+   *     dollar figure with no such label is fabricated precision.
+   */
+  const { React, mount } = liveReact()
+  const bodies = {
+    '/dsh-jev-kit/api/status': { version: '0.17.6', enabled: true, channels: 25, key: { configured: true, source: 'credential:file' }, budget: { dayCalls: 12, dailyCallLimit: 20000 } },
+    '/dsh-jev-kit/api/report?days=7': {
+      ok: true,
+      days: 7,
+      report: {
+        total: 143,
+        window: { days: 7, records: 4310 },
+        cost: { inputTokens: 120000, usd: 0.00504, savedCalls: 37 },
+        health: { degraded: 2, errors: 0 },
+        byEntry: [{ entry: 'auto', n: 78, flag: 3 }, { entry: 'hook', n: 40, flag: 1 }, { entry: 'abc-session', n: 25, flag: 0 }],
+        unusedChannels: ['route', 'evidence_check', 'bug_triage'],
+        channels: [
+          { channel: 'private_scan', group: 'P', n: 100, flagged: 4, warn: 0, level: 'useful', cached: 37, acted: 6, actedYes: 5, latency: { p50: 700, p95: 900 } },
+          { channel: 'retry', group: 'A', n: 43, flagged: 0, warn: 1, level: 'warn', cached: 0, acted: 0, actedYes: 0, latency: { p50: 600, p95: 800 } },
+        ],
+      },
+    },
+    '/dsh-jev-kit/api/thresholds': { ok: true, applied: {}, suggested: {}, details: [] },
+  }
+  globalThis.fetch = async (url) => ({ ok: true, json: async () => bodies[String(url)] })
+  try {
+    const { seats } = await boot({ react: React })
+    const tree = await mount(seats['jev-kit'])
+    const text = textOf(tree)
+    assert.match(text, /执行效果/)
+    assert.match(text, /143 次判定/)
+    assert.match(text, /4310 行/)
+    assert.match(text, /估算/, 'the dollar figure must be labelled an estimate')
+    assert.match(text, /37/, 'calls saved by the cache are worth showing')
+    assert.match(text, /降级 2 次/)
+    assert.match(text, /没有判定就放行了/, 'fail-open must not read as "nothing found"')
+    assert.match(text, /auto 78/, 'the automatic lane is visible as an entry point')
+    assert.match(text, /hook 40/)
+    assert.match(text, /abc-session 25/)
+    assert.match(text, /route · evidence_check · bug_triage/, 'zero-call channels are named, not counted')
+
+    const cellsOf = (row) => (row.children ?? []).filter((child) => child && child.type === 'td').map(textOf)
+    const table = find(tree, (node) => node.type === 'tr').map(cellsOf).filter((cells) => cells.length > 1)
+    const privateRow = table.find((cells) => cells[1] === 'private_scan')
+    assert.ok(privateRow, 'the channel row renders')
+    assert.equal(privateRow[6], '37', 'cached column')
+    assert.equal(privateRow[7], '5/6', 'acted column: adopted out of reported')
+    const retryRow = table.find((cells) => cells[1] === 'retry')
+    assert.equal(retryRow[6], '0', 'no cache hits is a real zero and may be printed as one')
+    assert.equal(retryRow[7], '未回填', 'no report is not 0% — that would accuse the channel of being ignored')
+  } finally {
+    delete globalThis.fetch
+  }
+})
+
+test('a report with nothing in it still answers "is it working" with a reason', async () => {
+  /*
+   * The empty window is its own answer, not a blank panel: a card that shows nothing at
+   * all cannot be told apart from a card that failed to load.
+   */
+  const { React, mount } = liveReact()
+  const bodies = {
+    '/dsh-jev-kit/api/status': { version: '0.17.6', enabled: true, channels: 25, key: { configured: true, source: 'credential:file' }, budget: {} },
+    '/dsh-jev-kit/api/report?days=7': { ok: true, days: 7, report: { total: 0, window: { days: 7, records: 0 }, cost: { usd: 0, inputTokens: 0, savedCalls: 0 }, health: { degraded: 0, errors: 0 }, byEntry: [], unusedChannels: [] } },
+    '/dsh-jev-kit/api/thresholds': { ok: true, applied: {}, suggested: {}, details: [] },
+  }
+  globalThis.fetch = async (url) => ({ ok: true, json: async () => bodies[String(url)] })
+  try {
+    const { seats } = await boot({ react: React })
+    const text = textOf(await mount(seats['jev-kit']))
+    assert.match(text, /还没有判定记录/, 'an empty window says so')
+    assert.match(text, /还没有判定——所以这里也没有入口/, 'and the entry-point block explains itself instead of being blank')
+    assert.match(text, /无（每个通道都被调用过）/, 'an empty unused-list is not an empty string')
+    assert.match(text, /没有降级、没有出错/, 'and zero problems is stated, not implied')
+  } finally {
+    delete globalThis.fetch
+  }
+})
+
 test('the bundle is a ModuleLoader bundle, not an ES module', () => {
   const source = fs.readFileSync(bundlePath, 'utf8')
   assert.match(source, /__ModuleLoader__\.load\(/)
