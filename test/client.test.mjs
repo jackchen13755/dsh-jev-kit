@@ -666,6 +666,115 @@ test('a report with nothing in it still answers "is it working" with a reason', 
   }
 })
 
+test('the prune try-out walks a whole execution, and refuses to look like a zero', async () => {
+  /*
+   * The panel exists so one execution can be *seen*: the per-segment scores, which rule
+   * decided each segment, and the accounting against "prune nothing". Three honesty rules
+   * are asserted because each one is a way the panel could lie:
+   *
+   *   · an unjudged segment must print `—`, not `0.00` — the planner kept it as a neutral
+   *     0.5, so a printed zero would contradict what actually happened;
+   *   · a 404 must name the real cause (the route is host-side, so it arrives with a DSH
+   *     restart), or the reader hunts a bug that is really a restart;
+   *   · "saves N%" needs the no-prune baseline next to it, or the percentage has no
+   *     denominator.
+   */
+  const { React, mount, render } = liveReact()
+  const bodies = {
+    '/dsh-jev-kit/api/status': { version: '0.17.7', enabled: true, channels: 25, key: { configured: true, source: 'credential:file' }, budget: {} },
+    '/dsh-jev-kit/api/report?days=7': { ok: true, days: 7, report: { total: 0, window: { days: 7, records: 0 }, cost: {}, health: {}, byEntry: [], unusedChannels: [] } },
+    '/dsh-jev-kit/api/thresholds': { ok: true, applied: {}, suggested: {}, details: [] },
+  }
+  const plan = {
+    ok: true,
+    units: 5,
+    degraded: 1,
+    budgetChars: 300,
+    minKeepRatio: 0.25,
+    totalChars: 500,
+    keptChars: 300,
+    droppedChars: 200,
+    baselineKeptChars: 500,
+    keptSegments: 3,
+    droppedSegments: 2,
+    edges: { head: 1, tail: 1 },
+    floorDecided: true,
+    summary: { edge: 2, floor: 1, budget: 0, dropped: 2, unjudged: 1 },
+    reason: '保留 3/5 段',
+    segments: [
+      { where: 'offset 0', preview: '$ pnpm install --frozen-lockfile', chars: 32, needed: 0.44, keep: true, decidedBy: 'edge' },
+      { where: 'offset 34', preview: 'warn deprecated left-pad@0.0.0', chars: 28, needed: 0.7, keep: true, decidedBy: 'floor' },
+      { where: 'offset 66', preview: 'ERR_PNPM_FETCH_403 ...', chars: 40, needed: 0.92, keep: true, decidedBy: 'budget' },
+      // No score at all: must not print as 0.00.
+      { where: 'offset 110', preview: 'progress 45%', chars: 11, needed: null, keep: false, decidedBy: 'dropped' },
+      { where: 'offset 124', preview: 'See /Users/dev/.npm/_logs for the report', chars: 39, needed: 0.51, keep: false, decidedBy: 'dropped' },
+    ],
+    keptText: '$ pnpm install --frozen-lockfile\n\nwarn deprecated left-pad@0.0.0\n\nERR_PNPM_FETCH_403 ...',
+  }
+  const posts = []
+  let pruneStatus = 200
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === 'POST' && String(url).includes('/api/prune')) {
+      posts.push(JSON.parse(init.body))
+      if (pruneStatus !== 200) return { ok: false, status: pruneStatus, json: async () => ({ ok: false, error: 'not found' }) }
+      return { ok: true, status: 200, json: async () => plan }
+    }
+    return { ok: true, status: 200, json: async () => bodies[String(url)] }
+  }
+  try {
+    const { seats } = await boot({ react: React })
+    const component = seats['jev-kit']
+    let tree = await mount(component)
+    assert.match(textOf(tree), /剪枝试跑/, 'the panel is on the card')
+    const runButton = find(tree, (node) => node.type === 'button' && textOf(node) === '试剪')
+    assert.equal(runButton.length, 1)
+    assert.equal(runButton[0].props.disabled, true, 'nothing to prune yet: no task, no text')
+
+    // Fill in the two fields the way a person does, then press it.
+    const inputs = find(tree, (node) => node.type === 'input' && node.props.type === 'text')
+    const textarea = find(tree, (node) => node.type === 'textarea')[0]
+    assert.ok(inputs[0] && textarea, 'the task field and the text box exist')
+    inputs[0].props.onChange({ target: { value: '为什么 CI 上的 install 失败' } })
+    textarea.props.onChange({ target: { value: '$ pnpm install\n\nERR_PNPM_FETCH_403' } })
+    tree = await render(component)
+    const armed = find(tree, (node) => node.type === 'button' && textOf(node) === '试剪')[0]
+    assert.equal(armed.props.disabled, false, 'with a task and text it becomes usable')
+    armed.props.onClick()
+    for (let i = 0; i < 40; i++) await new Promise((resolve) => setImmediate(resolve))
+
+    assert.deepEqual(posts, [{ task: '为什么 CI 上的 install 失败', text: '$ pnpm install\n\nERR_PNPM_FETCH_403', budgetChars: 4000 }])
+    const afterTree = await render(component)
+    const after = textOf(afterTree)
+    assert.match(after, /500 字符 \/ 5 段 → 保留 3 段 \/ 300 字符/)
+    assert.match(after, /省下 200 字符（40%）/)
+    assert.match(after, /基线保留 500/, 'a saving needs its denominator')
+    assert.match(after, /边界保留 2 · 地板内保留 1 · 按分数保留 0 · 剪掉 2 · 未判定 1/)
+    assert.match(after, /超出预算/, 'floorDecided must be visible, not silent')
+    assert.match(after, /1 段未能判定/, 'and so must a degraded judgment')
+    assert.match(after, /边界保留/, 'per-segment provenance is rendered')
+    assert.match(after, /地板内保留/)
+    assert.match(after, /ERR_PNPM_FETCH_403/, 'and the kept text is shown')
+    assert.match(after, /排序信号不是概率/, 'the honesty note travels with the numbers')
+
+    const cellsOf = (row) => (row.children ?? []).filter((child) => child && child.type === 'td').map(textOf)
+    const segmentRows = find(afterTree, (node) => node.type === 'tr').map(cellsOf).filter((cells) => cells.length === 4)
+    const unjudged = segmentRows.find((cells) => cells[1] === 'progress 45%')
+    assert.ok(unjudged, 'the unjudged segment is listed')
+    assert.equal(unjudged[2], '—', 'no score prints as — , never as 0.00')
+    const edgeRow = segmentRows.find((cells) => cells[3] === '边界保留')
+    assert.ok(edgeRow, 'the edge rule is named on the row it decided')
+
+    // A host that has not been restarted yet: say so instead of a generic failure.
+    pruneStatus = 404
+    const rerun = find(await render(component), (node) => node.type === 'button' && textOf(node) === '试剪')[0]
+    rerun.props.onClick()
+    for (let i = 0; i < 40; i++) await new Promise((resolve) => setImmediate(resolve))
+    assert.match(textOf(await render(component)), /宿主还是旧版本/, 'a 404 names the restart, not a mystery')
+  } finally {
+    delete globalThis.fetch
+  }
+})
+
 test('the bundle is a ModuleLoader bundle, not an ES module', () => {
   const source = fs.readFileSync(bundlePath, 'utf8')
   assert.match(source, /__ModuleLoader__\.load\(/)

@@ -9,7 +9,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { planPrune, keptText } from '../lib/prune.js'
+import { planPrune, keptText, summarizeDecisions } from '../lib/prune.js'
 
 /** `count` segments of `size` characters each, named by index. */
 const units = (sizes) => sizes.map((size, index) => ({ text: String(index).repeat(size), where: `seg${index}` }))
@@ -121,4 +121,50 @@ test('keptText returns the kept segments in their original order, not score orde
   const text = keptText(input, plan)
   const order = text.split('\n\n').map(part => part[0])
   assert.deepEqual(order, [...order].sort((a, b) => Number(a) - Number(b)), 'reordering the result would corrupt it')
+})
+
+test('every segment says which rule decided it — the safety net is visible, not assumed', () => {
+  /*
+   * Six 100-char segments (600), floor 25% = 150, budget 350.
+   *
+   * edges    : seg0, seg5                 → 200 chars, decided by `edge`
+   * floor    : already met at 200 (>=150), so nothing is needed for it
+   * budget   : seg2 (top score) fits at 300; seg3 would be 400 → dropped
+   * dropped  : seg1, seg3, seg4
+   */
+  const input = even(6, 100)
+  const scores = [0, 0, 0.9, 0.9, 0, 0]
+  const plan = planPrune(input, scores, { budgetChars: 350, minKeepRatio: 0.25 })
+  assert.deepEqual(plan.decidedBy, ['edge', 'dropped', 'budget', 'dropped', 'dropped', 'edge'])
+  assert.deepEqual(plan.decidedBy.map((d) => d === 'dropped'), plan.keep.map((k) => !k), 'provenance and keep agree')
+  assert.deepEqual(summarizeDecisions(scores, plan), { edge: 2, floor: 0, budget: 1, dropped: 3, unjudged: 0 })
+})
+
+test('a segment kept only to reach the floor is recorded as `floor`, not as merit', () => {
+  /*
+   * Ten 100-char segments (1000), floor 60% = 600, budget 0 — the budget cannot be
+   * honoured at all, so every kept segment beyond the two edges is there *because of the
+   * floor*. Calling those "budget" would say the scores earned them.
+   */
+  const input = even(10, 100)
+  const scores = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  const plan = planPrune(input, scores, { budgetChars: 0, minKeepRatio: 0.6 })
+  assert.equal(plan.keptChars >= 600, true, 'the floor is honoured above the budget')
+  assert.equal(plan.floorDecided, true)
+  const counts = summarizeDecisions(scores, plan)
+  assert.equal(counts.edge, 2, 'the two ends are pinned')
+  assert.equal(counts.floor, 4, 'and the rest of the floor is met in score order')
+  assert.deepEqual(plan.decidedBy.slice(2, 5), ['floor', 'floor', 'floor'], 'seg2–seg4 were kept purely to reach the floor')
+  assert.equal(plan.decidedBy[5], 'dropped', 'and once the floor was met, budget 0 dropped the rest')
+  assert.equal(counts.budget, 0, 'nothing was kept on merit once the floor was met and the budget was zero')
+  assert.equal(counts.dropped, 4)
+})
+
+test('unjudged segments are counted, because that says whether the prune was measured', () => {
+  const input = even(6, 100)
+  const scores = [undefined, 0.4, undefined, 0.9, undefined, undefined]
+  const plan = planPrune(input, scores, { budgetChars: 500, minKeepRatio: 0.25 })
+  const counts = summarizeDecisions(scores, plan)
+  assert.equal(counts.unjudged, 4, 'four segments had no score at all')
+  assert.equal(counts.edge + counts.floor + counts.budget + counts.dropped, 6, 'every segment is accounted for')
 })

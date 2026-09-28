@@ -63,9 +63,25 @@ export interface PruneOptions {
   minKeepRatio?: number
 }
 
+/**
+ * Why one segment ended up where it did.
+ *
+ * The four reasons *are* the envelope, so naming them per segment is what lets a reader
+ * watch it work instead of taking it on faith — and it is the only way to answer "did the
+ * safety rules actually fire on this input, or was everything decided by the scores":
+ *
+ *   · `edge`    — pinned at the head or the tail, whatever its score said;
+ *   · `floor`   — kept to reach the floor; its *order* decided it, not its score;
+ *   · `budget`  — kept on its own score, inside the budget;
+ *   · `dropped` — not kept.
+ */
+export type PruneDecision = 'edge' | 'floor' | 'budget' | 'dropped'
+
 export interface PrunePlan {
   /** Parallel to the input units: keep or drop. */
   keep: boolean[]
+  /** Parallel to the input units: which rule decided it (see {@link PruneDecision}). */
+  decidedBy: PruneDecision[]
   kept: Unit[]
   dropped: Unit[]
   keptChars: number
@@ -99,8 +115,9 @@ const sizeOf = (unit: Unit): number => unit.text.length
 export function planPrune (units: Unit[], scores: Array<number | undefined>, options: PruneOptions): PrunePlan {
   const totalChars = units.reduce((sum, unit) => sum + sizeOf(unit), 0)
   const keep = units.map(() => false)
+  const decidedBy: PruneDecision[] = units.map(() => 'dropped')
   if (!units.length) {
-    return { keep, kept: [], dropped: [], keptChars: 0, droppedChars: 0, totalChars: 0, baselineKeptChars: 0, edges: { head: 0, tail: 0 }, floorDecided: true, reason: '没有分段，无可剪' }
+    return { keep, decidedBy, kept: [], dropped: [], keptChars: 0, droppedChars: 0, totalChars: 0, baselineKeptChars: 0, edges: { head: 0, tail: 0 }, floorDecided: true, reason: '没有分段，无可剪' }
   }
 
   /*
@@ -112,8 +129,8 @@ export function planPrune (units: Unit[], scores: Array<number | undefined>, opt
   const want = Math.max(0, Math.floor(options.edgeSegments ?? DEFAULT_EDGES))
   const head = Math.min(want, units.length)
   const tail = Math.min(want, units.length - head)
-  for (let i = 0; i < head; i++) keep[i] = true
-  for (let i = units.length - tail; i < units.length; i++) keep[i] = true
+  for (let i = 0; i < head; i++) { keep[i] = true; decidedBy[i] = 'edge' }
+  for (let i = units.length - tail; i < units.length; i++) { keep[i] = true; decidedBy[i] = 'edge' }
 
   const scoreOf = (index: number): number => {
     const value = scores[index]
@@ -137,9 +154,13 @@ export function planPrune (units: Unit[], scores: Array<number | undefined>, opt
   for (const index of rest) {
     const size = sizeOf(units[index] as Unit)
     // Below the floor the budget is not consulted at all — that is what "the floor beats
-    // the budget" means; above it, only what fits is taken.
-    if (keptChars >= floorChars && keptChars + size > budget) continue
+    // the budget" means; above it, only what fits is taken. Which of the two applied is
+    // recorded, because "kept to reach the floor" and "kept on its own merit" are
+    // different statements about the same segment.
+    const byFloor = keptChars < floorChars
+    if (!byFloor && keptChars + size > budget) continue
     keep[index] = true
+    decidedBy[index] = byFloor ? 'floor' : 'budget'
     keptChars += size
   }
 
@@ -158,6 +179,7 @@ export function planPrune (units: Unit[], scores: Array<number | undefined>, opt
     : `保留 ${kept.length}/${units.length} 段 · ${keptChars}/${totalChars} 字符（预算 ${budget} 内按分数选取）`
   return {
     keep,
+    decidedBy,
     kept,
     dropped,
     keptChars,
@@ -173,3 +195,25 @@ export function planPrune (units: Unit[], scores: Array<number | undefined>, opt
 /** The kept text, in original order — what a caller would actually return. */
 export const keptText = (units: Unit[], plan: PrunePlan, joiner = '\n\n'): string =>
   units.filter((_, index) => plan.keep[index]).map(unit => unit.text).join(joiner)
+
+/**
+ * How many segments each rule accounted for.
+ *
+ * Exists so a caller can answer "did the safety net do anything here, or did the scores
+ * decide everything" without re-walking the plan — and so the answer is computed the same
+ * way in the tool, the route and the card.
+ *
+ * `unjudged` is counted separately from the four decisions because it is a statement about
+ * the *input*, not about the rule that kept or dropped the segment: a segment with no score
+ * was kept or dropped as a neutral 0.5, and that number is what says whether the prune was
+ * decided by measurements or by the absence of them.
+ */
+export function summarizeDecisions (scores: Array<number | undefined>, plan: PrunePlan): Record<PruneDecision, number> & { unjudged: number } {
+  const counts = { edge: 0, floor: 0, budget: 0, dropped: 0, unjudged: 0 }
+  plan.decidedBy.forEach((decision, index) => {
+    counts[decision]++
+    const score = scores[index]
+    if (!(typeof score === 'number' && Number.isFinite(score))) counts.unjudged++
+  })
+  return counts
+}

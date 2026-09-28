@@ -164,6 +164,33 @@ window.__ModuleLoader__.load({
         unused: '从未触发的通道（与 ⬛ 是一对：零调用 vs 从不表态，都是退役候选）',
         unusedNone: '无（每个通道都被调用过）',
         actedNotReported: '未回填',
+        prune: '剪枝试跑（贴一段工具输出，看它怎么剪）',
+        pruneHelp: '逐段判相关性 + 确定性信封。**只给方案，不改任何东西**；是否采用由你决定。需要宿主已是新版本（`POST /api/prune`）。',
+        pruneTask: '任务（相关性目标）：例如「为什么 CI 上的 install 失败」',
+        pruneText: '要剪的工具输出（整段粘贴）',
+        pruneBudget: '预算字符',
+        pruneRun: '试剪',
+        pruneStaleHost: '宿主还是旧版本——这条路由要重启 DSH 之后才存在（当前卡片是新的、宿主是旧的）。重启后再来。',
+        pruneOverview: (o) => o.note ? o.note : `${o.totalChars} 字符 / ${o.units} 段 → 保留 ${o.keptSegments} 段 / ${o.keptChars} 字符`,
+        pruneSaved: (o) => o.droppedChars
+          ? `相对「完全不剪」省下 ${o.droppedChars} 字符（${Math.round((o.droppedChars / Math.max(1, o.totalChars)) * 100)}%）；基线保留 ${o.baselineKeptChars}`
+          : '没有可省的字符（预算够用，或有地板托底）',
+        pruneRules: (o) => {
+          const s = o.summary ?? {}
+          const base = `边界保留 ${s.edge ?? 0} · 地板内保留 ${s.floor ?? 0} · 按分数保留 ${s.budget ?? 0} · 剪掉 ${s.dropped ?? 0} · 未判定 ${s.unjudged ?? 0}`
+          const over = o.floorDecided ? ' · ⚠️ 结果超出预算（头尾与地板恒定保留，预算是软的）' : ''
+          const deg = o.degraded ? ` · ⚠️ 有 ${o.degraded} 段未能判定（按中性处理，没被优先剪掉）` : ''
+          return base + over + deg
+        },
+        colPruneIndex: '#',
+        colPrunePreview: '段（截前 90 字）',
+        colPruneScore: 'needed',
+        colPruneDecision: '决定',
+        decisionLabel: { edge: '边界保留', floor: '地板内保留', budget: '按分数保留', dropped: '剪掉' },
+        pruneDecisionLegend: '决定栏读法：**边界保留** = 头尾规则钉住（与分数无关）· **地板内保留** = 在达到地板之前收入，此时预算根本没被咨询（分数决定的是顺序，不是去留）· **按分数保留** = 地板达标后按分数装进预算 · **剪掉** = 未保留',
+        pruneKept: '剪枝后的文本（可复制）',
+        pruneNoSegments: '没有可判定的分段（内容太短或只有一段）。',
+        pruneHonesty: 'needed 是**排序信号不是概率**（实测刻度压缩在 0.16–0.9，真错误 0.92、无关的 deprecated 警告 0.64–0.72）。所以规则永远优先于分数：头尾恒定保留、地板优先于预算、绝不剪空。',
         colFit: '调整',
         fitLegend: '🟢 可调整（分离度够 + 留出折上收益 > 2 点）· ⚪ 无需改动（现值已接近留出折最优）· ⬛ 不可拟合（分离度 < 0.75，照改就是过拟合）',
         axisNote: '按轴刀口（优先于通道级，且应用建议时会保留）',
@@ -248,6 +275,33 @@ window.__ModuleLoader__.load({
         unused: 'Channels never triggered (the partner of ⬛: zero calls vs never spoke up — both are retirement candidates)',
         unusedNone: 'none (every channel has been called)',
         actedNotReported: 'not reported',
+        prune: 'Prune try-out (paste a tool result and watch what it cuts)',
+        pruneHelp: 'Per-segment relevance plus a deterministic envelope. **It returns a plan and changes nothing**; adopting it is your call. Needs a current host (`POST /api/prune`).',
+        pruneTask: 'Task (the relevance target), e.g. "why did install fail on CI"',
+        pruneText: 'The tool result to prune (paste it whole)',
+        pruneBudget: 'budget chars',
+        pruneRun: 'Try a prune',
+        pruneStaleHost: 'The host is still the old build — this route only exists after a DSH restart (the card is new, the host is not). Come back after restarting.',
+        pruneOverview: (o) => o.note ? o.note : `${o.totalChars} chars / ${o.units} segments → kept ${o.keptSegments} segments / ${o.keptChars} chars`,
+        pruneSaved: (o) => o.droppedChars
+          ? `saves ${o.droppedChars} chars vs pruning nothing (${Math.round((o.droppedChars / Math.max(1, o.totalChars)) * 100)}%); the baseline keeps ${o.baselineKeptChars}`
+          : 'nothing to save (the budget was enough, or the floor covered it)',
+        pruneRules: (o) => {
+          const s = o.summary ?? {}
+          const base = `edge-kept ${s.edge ?? 0} · within floor ${s.floor ?? 0} · kept on score ${s.budget ?? 0} · dropped ${s.dropped ?? 0} · unjudged ${s.unjudged ?? 0}`
+          const over = o.floorDecided ? ' · ⚠️ over budget (head, tail and floor are pinned; the budget is soft)' : ''
+          const deg = o.degraded ? ` · ⚠️ ${o.degraded} segment(s) unjudged (treated as neutral, not pruned first)` : ''
+          return base + over + deg
+        },
+        colPruneIndex: '#',
+        colPrunePreview: 'segment (first 90 chars)',
+        colPruneScore: 'needed',
+        colPruneDecision: 'decided',
+        decisionLabel: { edge: 'edge-kept', floor: 'within floor', budget: 'kept on score', dropped: 'dropped' },
+        pruneDecisionLegend: 'How to read the decision column: **edge-kept** = pinned by the head/tail rule, whatever the score · **within floor** = taken before the floor was reached, so the budget was never consulted (the score decided its *order*, not whether it stayed) · **kept on score** = taken on its own score once the floor was met · **dropped** = not kept',
+        pruneKept: 'The pruned text (copyable)',
+        pruneNoSegments: 'no judgeable segments (the content is too short, or it is one block).',
+        pruneHonesty: '`needed` is a **ranking signal, not a probability** (measured: the scale compresses into 0.16–0.9 — the real error scored 0.92 while irrelevant `warn deprecated` lines scored 0.64–0.72). So the rules always outrank the scores: head and tail pinned, floor before budget, never empty.',
         colFit: 'adjust',
         fitLegend: '🟢 adjustable (separated + > 2 points gained on the held-out folds) · ⚪ no change needed (already near the held-out optimum) · ⬛ not fittable (separation < 0.75: following it is overfitting)',
         axisNote: 'per-axis cut (wins over the channel-level one, and an apply preserves it)',
@@ -453,6 +507,13 @@ window.__ModuleLoader__.load({
         const [days, setDays] = React.useState(7)
         const [note, setNote] = React.useState('')
         const [busy, setBusy] = React.useState(false)
+        /* The prune try-out keeps its own state: it is the one action here that reads no
+         * ledger and writes nothing, so a failure in it must not disturb the card's. */
+        const [pruneTask, setPruneTask] = React.useState('')
+        const [pruneText, setPruneText] = React.useState('')
+        const [pruneBudget, setPruneBudget] = React.useState(4000)
+        const [pruneOut, setPruneOut] = React.useState(null)
+        const [pruneError, setPruneError] = React.useState('')
         const t = S[lang] ?? S.zh
 
         const load = React.useCallback(async (window_) => {
@@ -501,6 +562,40 @@ window.__ModuleLoader__.load({
             setNote(report ? report(body) : t.saved)
           } catch (error) {
             setNote(`${t.saveFailed}: ${error && error.message ? error.message : error}`)
+          }
+        }
+
+        /**
+         * Run one prune and show the whole execution: the per-segment scores, which rule
+         * decided each one, and the accounting against "prune nothing".
+         *
+         * A 404 gets its own message rather than the generic failure, because it is the one
+         * error here with an obvious cause and an obvious fix: the route lives in the *host*
+         * half, which only changes on a DSH restart. Reporting "读不到接口" would send the
+         * reader looking for a bug that is really a restart.
+         */
+        const runPrune = async () => {
+          setBusy(true)
+          setPruneError('')
+          setPruneOut(null)
+          try {
+            const response = await fetch('/dsh-jev-kit/api/prune', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                task: pruneTask.trim(),
+                text: pruneText,
+                budgetChars: Number(pruneBudget) || 4000,
+              }),
+            })
+            if (response.status === 404) { setPruneError(t.pruneStaleHost); return }
+            const body = await response.json().catch(() => ({}))
+            if (body.ok !== true) { setPruneError(String(body.error ?? response.status)); return }
+            setPruneOut(body)
+          } catch (error) {
+            setPruneError(String(error && error.message ? error.message : error))
+          } finally {
+            setBusy(false)
           }
         }
 
@@ -553,6 +648,69 @@ window.__ModuleLoader__.load({
             : t.byEntryNone),
           h('div', { style: label }, t.unused),
           h('div', { style: muted }, overview.unused.length ? overview.unused.join(' · ') : t.unusedNone)))
+
+        /*
+         * 「剪枝试跑」— one execution, end to end.
+         *
+         * The point is the third column of the result table: `decidedBy`. A prune that
+         * shows only which segments survived leaves the reader guessing whether the safety
+         * rules did anything or the scores decided everything — and on this corpus that is
+         * exactly the question, since the relevance channel is a ranker whose margins are
+         * thin. Naming the rule per segment turns the envelope from a promise into a
+         * reading. It calls a route that returns a plan and writes nothing.
+         */
+        children.push(h('div', { key: 'prune', style: divider },
+          h('div', { style: label }, t.prune),
+          h('div', { style: muted }, t.pruneHelp),
+          h('input', {
+            type: 'text',
+            value: pruneTask,
+            placeholder: t.pruneTask,
+            onChange: (event) => setPruneTask(event.target.value),
+            style: { width: '100%', boxSizing: 'border-box', fontSize: '12px', padding: '4px 8px', borderRadius: '6px', border: '1px solid rgba(127,127,127,0.4)', background: 'transparent', color: 'inherit' },
+          }),
+          h('textarea', {
+            value: pruneText,
+            placeholder: t.pruneText,
+            rows: 4,
+            onChange: (event) => setPruneText(event.target.value),
+            style: { width: '100%', boxSizing: 'border-box', fontSize: '12px', padding: '4px 8px', borderRadius: '6px', border: '1px solid rgba(127,127,127,0.4)', background: 'transparent', color: 'inherit', fontFamily: 'inherit', resize: 'vertical' },
+          }),
+          h('div', { style: row },
+            h('span', { style: label }, t.pruneBudget),
+            h('input', {
+              type: 'number',
+              value: pruneBudget,
+              onChange: (event) => setPruneBudget(event.target.value),
+              style: { width: '96px', fontSize: '12px', padding: '4px 8px', borderRadius: '6px', border: '1px solid rgba(127,127,127,0.4)', background: 'transparent', color: 'inherit' },
+            }),
+            button(t.pruneRun, busy || pruneTask.trim() === '' || pruneText.trim() === '', () => { void runPrune() })),
+          pruneError ? h('div', { style: { fontSize: '12px', color: TONE.warn } }, pruneError) : null,
+          pruneOut
+            ? h('div', { key: 'prune-out', style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+              h('div', null, t.pruneOverview(pruneOut)),
+              h('div', { style: muted }, t.pruneSaved(pruneOut)),
+              h('div', { style: pruneOut.floorDecided || pruneOut.degraded ? { fontSize: '12px', color: TONE.warn } : muted }, t.pruneRules(pruneOut)),
+              (pruneOut.segments ?? []).length
+                ? h('table', { style: table },
+                  h('thead', null, h('tr', null,
+                    h('th', { style: cellNum }, t.colPruneIndex),
+                    h('th', { style: headCell }, t.colPrunePreview),
+                    h('th', { style: cellNum }, t.colPruneScore),
+                    h('th', { style: headCell }, t.colPruneDecision))),
+                  h('tbody', null, ...(pruneOut.segments ?? []).map((segment, index) => h('tr', { key: `${segment.where}-${index}` },
+                    h('td', { style: cellNum }, index + 1),
+                    h('td', { style: cell, title: segment.where }, segment.preview),
+                    // An unjudged segment prints "—", not 0.00: the planner kept it as a
+                    // neutral 0.5, and a printed zero would contradict what actually happened.
+                    h('td', { style: cellNum }, segment.needed === null || segment.needed === undefined ? '—' : Number(segment.needed).toFixed(2)),
+                    h('td', { style: segment.keep ? cell : { ...cell, opacity: 0.6 } }, (t.decisionLabel ?? {})[segment.decidedBy] ?? segment.decidedBy)))))
+                : h('div', { style: muted }, t.pruneNoSegments),
+              (pruneOut.segments ?? []).length ? h('div', { style: muted }, t.pruneDecisionLegend) : null,
+              h('div', { style: label }, t.pruneKept),
+              h('textarea', { readOnly: true, value: pruneOut.keptText ?? '', rows: 6, style: { width: '100%', boxSizing: 'border-box', fontSize: '12px', padding: '4px 8px', borderRadius: '6px', border: '1px solid rgba(127,127,127,0.4)', background: 'transparent', color: 'inherit', fontFamily: 'inherit' } }),
+              h('div', { style: muted }, t.pruneHonesty))
+            : null))
 
         children.push(h('div', { key: 'credential', style: divider },
           h('div', { style: label }, t.credentials),

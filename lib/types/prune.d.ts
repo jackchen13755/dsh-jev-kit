@@ -61,9 +61,24 @@ export interface PruneOptions {
      */
     minKeepRatio?: number;
 }
+/**
+ * Why one segment ended up where it did.
+ *
+ * The four reasons *are* the envelope, so naming them per segment is what lets a reader
+ * watch it work instead of taking it on faith — and it is the only way to answer "did the
+ * safety rules actually fire on this input, or was everything decided by the scores":
+ *
+ *   · `edge`    — pinned at the head or the tail, whatever its score said;
+ *   · `floor`   — kept to reach the floor; its *order* decided it, not its score;
+ *   · `budget`  — kept on its own score, inside the budget;
+ *   · `dropped` — not kept.
+ */
+export type PruneDecision = 'edge' | 'floor' | 'budget' | 'dropped';
 export interface PrunePlan {
     /** Parallel to the input units: keep or drop. */
     keep: boolean[];
+    /** Parallel to the input units: which rule decided it (see {@link PruneDecision}). */
+    decidedBy: PruneDecision[];
     kept: Unit[];
     dropped: Unit[];
     keptChars: number;
@@ -93,3 +108,18 @@ export interface PrunePlan {
 export declare function planPrune(units: Unit[], scores: Array<number | undefined>, options: PruneOptions): PrunePlan;
 /** The kept text, in original order — what a caller would actually return. */
 export declare const keptText: (units: Unit[], plan: PrunePlan, joiner?: string) => string;
+/**
+ * How many segments each rule accounted for.
+ *
+ * Exists so a caller can answer "did the safety net do anything here, or did the scores
+ * decide everything" without re-walking the plan — and so the answer is computed the same
+ * way in the tool, the route and the card.
+ *
+ * `unjudged` is counted separately from the four decisions because it is a statement about
+ * the *input*, not about the rule that kept or dropped the segment: a segment with no score
+ * was kept or dropped as a neutral 0.5, and that number is what says whether the prune was
+ * decided by measurements or by the absence of them.
+ */
+export declare function summarizeDecisions(scores: Array<number | undefined>, plan: PrunePlan): Record<PruneDecision, number> & {
+    unjudged: number;
+};
