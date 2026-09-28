@@ -344,6 +344,46 @@ export const CHANNELS: Record<string, ChannelSpec> = {
     },
   },
 
+  output_relevance: {
+    id: 'output_relevance',
+    group: 'A',
+    title: '工具输出分段相关性（剪枝用）',
+    intent: '一段大结果里，哪些段是完成当前任务真正需要的——用于剪枝，取代"按位置截断"',
+    per: 'item',
+    at: 0.5,
+    questions: () => ({
+      needed: noul('Is the passage in `text` needed to act on `task` — either because it carries the answer, the evidence or the error, or because dropping it would make the remaining text misleading?',
+        'the passage is needed to act on the task',
+        'the passage can be dropped without losing anything the task needs'),
+      /*
+       * A second question only if it separates, and this one earns its place by catching
+       * the failure the first question cannot see: boilerplate that is *pinned* by the
+       * envelope anyway (a header, a progress line) reads as "needed" to a passage
+       * judge, while what actually matters is whether the passage carries a fact.
+       */
+      fact: noul('Does `text` state a fact (a value, an error, a name, a count, a line of code) that the task needs, rather than framing, progress output or repetition?',
+        'it states a fact the task needs',
+        'it is framing, progress chatter or repetition'),
+    }),
+    read: (answers, state) => {
+      const needed = p(answers, 'needed')
+      const fact = p(answers, 'fact')
+      /*
+       * `needed` decides, for the same reason `scope_check` lets `in_scope` decide: it is
+       * the question that separates. `fact` is reported and fed to the planner as a
+       * tie-break, but promoting it to the level would mark ordinary context amber — and
+       * an amber verdict on a segment nobody will act on is noise in the ledger.
+       */
+      const drop = needed !== undefined && needed < 0.5
+      return {
+        level: drop ? 'flag' : 'info',
+        headline: drop ? '⚠️ 可剪掉' : '需要保留',
+        details: [`needed=${show(needed, 0.5)} fact=${show(fact)}`, `片段：${(state.text ?? '').slice(0, 100)}`],
+        values: { needed, fact },
+      }
+    },
+  },
+
   route: {
     id: 'route',
     group: 'A',

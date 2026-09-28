@@ -27,6 +27,7 @@ dsh plugin --profile web add github:jackchen13755/dsh-jev-kit
 | **P** | `memory_write` | 值得记吗 / 哪一轨 | 记忆插件里那次"整段对话喂给 LLM"的往返（三问一次请求） |
 | **P** | `memory_conflict` | 两条记忆矛盾吗 / 重复吗 | 知识库清理 |
 | **A** | `sufficient` | 工具结果够答了吗 | 一整轮"再确认一下"（**只建议，不强制收束**） |
+| **A** | `output_relevance` | 大结果里哪些段是任务真正需要的 | 按位置截断（`head`/`tail` 那种"剪掉中间、答案没了"）；`jev_kit_prune` 用它 + 确定性剪枝信封（头尾恒定保留、地板优先于预算、绝不剪空） |
 | **A** | `retry` | 重试还是停 | 确定性失败上的重试循环 |
 | **A** | `route` | 这轮该用哪档模型 | 简单轮次占用强模型 |
 | **A** | `duplicate_call` | 与已有调用等价吗 | 重复 read/grep |
@@ -56,6 +57,7 @@ dsh plugin --profile web add github:jackchen13755/dsh-jev-kit
 | `jev_kit_scope_check { task, diff }` | **优先事项 3**：逐 hunk 范围门禁 |
 | `jev_kit_memory { mode: write\|conflict\|rerank }` | **优先事项 2** + 组 D |
 | `jev_kit_triage { kind: log\|alert\|bug\|flaky, items, context }` | 组 C：批量分诊 + 汇总 |
+| `jev_kit_prune { task, text, budgetChars?, minKeepRatio? }` | 剪枝入口：逐段判相关性 + 确定性信封（头尾保留、地板优先、绝不剪空），**只给方案不改任何东西**，并报出相对"完全不剪"省了多少 |
 | `jev_kit_pick { task, candidates, noun }` | 组 C：带 no-match 的选择 |
 | `jev_kit_bench { engines?, verbose? }` | **引擎对照测量**：32 条夹具（含 lens 命令措辞 12 条）跑遍每个引擎，出分离度/达到真值/延迟 |
 | `jev_kit_status` / `jev_kit_report [days]` | 运行态 / 按通道的账本报告 |
@@ -147,7 +149,7 @@ jev_kit_bench { engines: ["jev", "laya"], verbose: true }
 
 ### 阈值拟合：分离度好而通过率低 ≠ 判错
 
-分离度高（排序对）而阈值通过率低，意味着**概率刻度与手选的刀口不匹配**（Jev 官方口径：p 是排序信号不是概率）。所以测量台现在**从语料拟合每个通道的刀口**（取所有观测值中点中使准确率最大的那个）：
+分离度高（排序对）而阈值通过率低，意味着**概率刻度与手选的刀口不匹配**——但这个说法在 2026-09-28 之前一直是**断言**：只测了分离度，没测刻度。现在逐通道量了（`Brier` / 基线 / 技能 / `ECE` / 最大偏差，见 `src/calibration.ts`；设置卡的「刻度」列即此），结论是**按通道才成立**：`private_scan`（n=58）Brier 0.028 对基线 0.25 是可当概率用的，而 `sufficient`（n=12）0.244 对基线 0.25——分离度 1.00 却几乎不含概率信息。所以"p 是排序信号不是概率"是过度概括，**具体通道以刻度表为准**。测量台也从语料拟合每个通道的刀口（取所有观测值中点中使准确率最大的那个）：
 
 | 通道 | 现值 | 语料拟合值 | 通过率 | 拟合后 | n |
 |---|---|---|---|---|---|

@@ -96,6 +96,28 @@ test('scope_check treats a low in_scope as out of scope', () => {
   assert.match(read({ in_scope: 0.9, necessary: 0.1 }).details[0], /不参与判定/)
 })
 
+test('output_relevance publishes the field the pruner consumes, and only `needed` decides', () => {
+  /*
+   * `planPrune` scores a segment by `values.needed`. If this channel ever renamed that
+   * field, every segment would read as "never judged", the planner would treat them all
+   * as neutral, and the prune would quietly keep everything — a silent no-op that looks
+   * exactly like a successful prune. So the field contract is asserted, not assumed.
+   */
+  const read = (values) => CHANNELS.output_relevance.read(answer(values), { text: 'seg' })
+  const needed = read({ needed: 0.2, fact: 0.9 })
+  assert.equal(needed.values.needed, 0.2, 'the pruner reads `needed`; the name is a contract')
+  assert.equal(needed.level, 'flag')
+  assert.match(needed.headline, /可剪掉/)
+  // A fact-rich passage the passage judge dislikes is still a drop — but the number is
+  // published so a caller can see the disagreement rather than being told a story.
+  assert.equal(read({ needed: 0.9, fact: 0.1 }).level, 'info')
+  assert.equal(read({ needed: 0.9, fact: 0.1 }).values.fact, 0.1, '`fact` is reported, never the level')
+  // Unanswered must stay `undefined` so the planner can treat it as neutral rather than
+  // as a confident zero.
+  assert.equal(read({}).values.needed, undefined)
+  assert.equal(read({}).level, 'info')
+})
+
 test('sufficient only says stop when coverage is high AND nothing is missing', () => {
   const read = (values) => CHANNELS.sufficient.read(answer(values), {})
   assert.equal(read({ answers: 0.95, missing: 0.05 }).level, 'ok')
