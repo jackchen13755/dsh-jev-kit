@@ -55,12 +55,17 @@ function liveReact () {
     useEffect: (fn) => { slot.effects.push(fn) },
     useCallback: (fn) => fn,
   }
-  /** Render once, run the mount effects, then keep re-rendering while state moves. */
-  const mount = async (Component) => {
-    slot.effects = []
+  /**
+   * Re-render the settled component *without* re-running its effects, which is what a
+   * state change does in the browser.
+   *
+   * `mount()` cannot stand in for this: it re-runs the mount effects, and the card's
+   * mount effect reloads — which clears the note. Using it to look at a note would have
+   * reproduced the bug instead of catching it.
+   */
+  const render = async (Component) => {
     slot.cursor = 0
     let tree = Component()
-    for (const effect of slot.effects) await effect()
     for (let i = 0; i < 20; i++) {
       await settle()
       if (!slot.dirty) continue
@@ -70,7 +75,15 @@ function liveReact () {
     }
     return tree
   }
-  return { React, mount }
+  /** Render once, run the mount effects, then keep re-rendering while state moves. */
+  const mount = async (Component) => {
+    slot.effects = []
+    slot.cursor = 0
+    Component()
+    for (const effect of slot.effects) await effect()
+    return await render(Component)
+  }
+  return { React, mount, render }
 }
 
 /** Load the bundle and return the plugin face it registered. */
@@ -329,12 +342,167 @@ test('the threshold table shows a fit that suggests nothing, and never paints it
   globalThis.fetch = async (url) => ({ ok: true, json: async () => bodies[String(url)] })
   try {
     const { seats } = await boot({ react: React })
-    const text = textOf(await mount(seats['jev-kit']))
+    const tree = await mount(seats['jev-kit'])
+    const text = textOf(tree)
     assert.doesNotMatch(text, /还没有拟合结果/, 'a fit that needs no change is still a fit')
     for (const channel of ['scope_check', 'retry', 'noisy_channel']) assert.match(text, new RegExp(channel))
     assert.match(text, /⚪ 无需改动/, 'the fit legend explains what each marker means')
     assert.match(text, /0\.33/, 'the recommendation is still shown for the record')
     assert.match(text, /⬛/, 'a fit whose separation is below the bar is marked as not fittable')
+    /*
+     * The button must be dead here, and it must say why.
+     *
+     * `suggested` is the host's apply-ready subset and this fixture is the real live
+     * state of the machine: every fit failed held-out validation, so it is `{}`. The
+     * button used to render enabled anyway, POST `{thresholds:{}}`, receive `ok:true`
+     * (a merge with nothing to merge) and leave the table byte-identical — a click that
+     * provably could not do anything, presented as the one action on the card.
+     */
+    const apply = find(tree, (node) => node.type === 'button' && textOf(node) === '应用建议阈值')
+    assert.equal(apply.length, 1, 'the apply button is on the card')
+    assert.equal(apply[0].props.disabled, true, 'nothing to apply must not look pressable')
+    assert.match(text, /没有可应用的改动/, 'and the card says so instead of staying silent')
+    assert.match(text, /3 项拟合/, 'naming how many fits it looked at')
+  } finally {
+    delete globalThis.fetch
+  }
+})
+
+test('thresholdChanges keeps only the cuts that would really move', async () => {
+  /*
+   * The apply button's payload, as a pure function, because "what counts as a change"
+   * is where the silent no-op lived: the card used to send the whole `suggested` map,
+   * so a key already at its suggested value travelled as if it were work.
+   */
+  const { plugin } = await boot()
+  const { thresholdChanges } = plugin.__internals
+  assert.deepEqual(thresholdChanges(null), [], 'no payload yet is no changes')
+  assert.deepEqual(thresholdChanges({ applied: {}, suggested: {} }), [], 'an empty fit is empty')
+  assert.deepEqual(thresholdChanges({ applied: { risk: 0.43 }, suggested: { risk: 0.43 } }), [], 'already in force is not a change')
+  assert.deepEqual(
+    thresholdChanges({
+      // The per-axis keys are the ones a hand-cut lives on; they must be treated like
+      // any other key rather than filtered by their dots.
+      applied: { risk: 0.6, 'private_scan.internal': 0.75 },
+      suggested: { risk: 0.43, 'private_scan.internal': 0.75, log_triage: 0.3, junk: 'nope', nan: Number.NaN },
+    }),
+    [{ key: 'risk', from: 0.6, to: 0.43 }, { key: 'log_triage', from: null, to: 0.3 }],
+    'a real move, a brand-new key, and nothing else'
+  )
+})
+
+test('an apply is judged by the host echo, not by a 200', async () => {
+  /*
+   * The route answers `ok: true` for a patch that merges to nothing, so a status code
+   * cannot tell "the cut moved" from "the request was accepted and ignored". The note
+   * is built from `settings.thresholds`, and a missing echo is reported as not landing
+   * rather than assumed good.
+   */
+  const { plugin } = await boot()
+  const { appliedNote } = plugin.__internals
+  const changes = [{ key: 'risk', from: 0.6, to: 0.43 }, { key: 'sufficient', from: 0.8, to: 0.08 }]
+  const { moved, missed } = appliedNote(changes, { risk: 0.43 })
+  assert.deepEqual(moved, [changes[0]])
+  assert.deepEqual(missed, [changes[1]], 'a key the host did not echo did not land')
+  assert.deepEqual(appliedNote(changes, undefined).missed, changes, 'no echo is not evidence')
+  assert.deepEqual(appliedNote(changes, {}).moved, [])
+})
+
+test('a real apply posts the difference, and the note survives the reload', async () => {
+  /*
+   * Two failures met in this one path and both made the button read as dead:
+   *
+   *   · the note was set *before* `load()`, and `load()` clears the note when it
+   *     succeeds — so a save that worked and a click that did nothing looked identical;
+   *   · nothing said what had been written, so even a landing save left the reader
+   *     comparing threshold tables by eye.
+   *
+   * This walks the path the browser walks: render → click → POST → reload → re-render,
+   * and asserts the posted body, the note, and that the button goes quiet afterwards.
+   */
+  const { React, mount, render } = liveReact()
+  const thresholds = {
+    ok: true,
+    applied: { risk: 0.6, sufficient: 0.8 },
+    suggested: { risk: 0.43, sufficient: 0.8 },
+    details: [
+      { channel: 'risk', current: 0.6, recommended: 0.43, accuracyNow: 0.909, accuracyFitted: 0.955, accuracyCrossVal: 0.909, n: 22, separation: 0.95, trustworthy: true, changes: true, level: 'adjustable' },
+      { channel: 'sufficient', current: 0.8, recommended: 0.8, accuracyNow: 0.92, accuracyFitted: 0.92, accuracyCrossVal: 0.92, n: 12, separation: 0.9, trustworthy: true, changes: false, level: 'optimal' },
+    ],
+  }
+  const bodies = {
+    '/dsh-jev-kit/api/status': { version: '0.17.1', enabled: true, channels: 23, key: { configured: true, source: 'credential:file' }, budget: {} },
+    '/dsh-jev-kit/api/report?days=7': { ok: true, days: 7, report: { total: 2, window: { days: 7 }, channels: [{ channel: 'risk', group: 'B', n: 2, flagged: 1, warn: 0, latency: {} }] } },
+    '/dsh-jev-kit/api/thresholds': thresholds,
+  }
+  const posts = []
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === 'POST') {
+      const patch = JSON.parse(init.body)
+      posts.push(patch)
+      // Mirror the host: merge the patch into what is in force, then echo every key.
+      for (const [key, cut] of Object.entries(patch.thresholds ?? {})) thresholds.applied[key] = cut
+      thresholds.suggested = {}
+      return { ok: true, json: async () => ({ ok: true, settings: { thresholds: thresholds.applied } }) }
+    }
+    return { ok: true, json: async () => bodies[String(url)] }
+  }
+  try {
+    const { seats } = await boot({ react: React })
+    const component = seats['jev-kit']
+    const tree = await mount(component)
+    const apply = find(tree, (node) => node.type === 'button' && textOf(node) === '应用建议阈值')
+    assert.equal(apply.length, 1)
+    assert.equal(apply[0].props.disabled, false, 'a fit with a real change must be pressable')
+    assert.match(textOf(tree), /risk 0\.60 → 0\.43/, 'and it says what it is about to write')
+    assert.doesNotMatch(textOf(tree), /sufficient 0\.80 →/, 'a cut already in force is not a change')
+
+    apply[0].props.onClick()
+    for (let i = 0; i < 40; i++) await new Promise((resolve) => setImmediate(resolve))
+
+    assert.deepEqual(posts, [{ thresholds: { risk: 0.43 } }], 'only the difference is sent')
+    const after = await render(component)
+    const afterText = textOf(after)
+    assert.match(afterText, /已应用：risk 0\.60 → 0\.43/, 'the note names what moved, from the host echo')
+    assert.match(afterText, /已应用：risk 0\.60 → 0\.43/, 'and the reload did not erase it')
+    const applyAfter = find(after, (node) => node.type === 'button' && textOf(node) === '应用建议阈值')
+    assert.equal(applyAfter[0].props.disabled, true, 'with nothing left to apply it goes quiet')
+    assert.match(afterText, /没有可应用的改动/, 'saying why instead of looking pressable')
+  } finally {
+    delete globalThis.fetch
+  }
+})
+
+test('an apply whose key did not land says so instead of claiming a save', async () => {
+  /*
+   * The failure this guards against is the family's oldest one: a write reported as
+   * done that did not happen. The host is stubbed to accept the POST and echo a
+   * thresholds map *without* the key — the shape a rejected or dropped key produces.
+   */
+  const { React, mount, render } = liveReact()
+  const bodies = {
+    '/dsh-jev-kit/api/status': { version: '0.17.1', enabled: true, channels: 23, key: { configured: true, source: 'credential:file' }, budget: {} },
+    '/dsh-jev-kit/api/report?days=7': { ok: true, days: 7, report: { total: 1, window: { days: 7 }, channels: [] } },
+    '/dsh-jev-kit/api/thresholds': {
+      ok: true,
+      applied: { risk: 0.6 },
+      suggested: { risk: 0.43 },
+      details: [{ channel: 'risk', current: 0.6, recommended: 0.43, accuracyNow: 0.9, accuracyFitted: 0.96, accuracyCrossVal: 0.92, n: 22, separation: 0.95, trustworthy: true, changes: true, level: 'adjustable' }],
+    },
+  }
+  globalThis.fetch = async (url, init) => {
+    if (init?.method === 'POST') return { ok: true, json: async () => ({ ok: true, settings: { thresholds: {} } }) }
+    return { ok: true, json: async () => bodies[String(url)] }
+  }
+  try {
+    const { seats } = await boot({ react: React })
+    const component = seats['jev-kit']
+    const tree = await mount(component)
+    find(tree, (node) => node.type === 'button' && textOf(node) === '应用建议阈值')[0].props.onClick()
+    for (let i = 0; i < 40; i++) await new Promise((resolve) => setImmediate(resolve))
+    const text = textOf(await render(component))
+    assert.match(text, /未落地：risk/, 'a key the host did not echo is reported, not glossed over')
+    assert.doesNotMatch(text, /已应用：risk/, 'and must not be announced as applied')
   } finally {
     delete globalThis.fetch
   }

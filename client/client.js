@@ -73,6 +73,60 @@ window.__ModuleLoader__.load({
       return fit?.trustworthy === true && fit?.changes !== false && gain > 0.02 ? 'adjustable' : 'optimal'
     }
 
+    /**
+     * Which suggested cuts would actually move the cut in force.
+     *
+     * `suggested` is the host's *apply-ready* table — trustworthy fits only — and it is
+     * routinely **empty**: on this machine all eight recorded fits failed held-out
+     * validation, so every cut in force is already the one the corpus supports. The card
+     * rendered a live button for that state anyway, and `POST {thresholds:{}}` merges
+     * nothing and answers `ok: true`, so the click changed nothing anywhere.
+     *
+     * A button whose only possible outcome is "nothing" must not look pressable. This is
+     * also why the button sends the *difference* rather than the raw table: a key already
+     * at its suggested value is not a change, and reporting it as one is the same lie in
+     * a smaller place.
+     *
+     * @param {object} thresholds - the `GET /api/thresholds` body.
+     * @returns {Array<{key: string, from: number|null, to: number}>} the real changes.
+     */
+    function thresholdChanges (thresholds) {
+      const applied = thresholds?.applied ?? {}
+      const changes = []
+      for (const [key, cut] of Object.entries(thresholds?.suggested ?? {})) {
+        const to = Number(cut)
+        if (!Number.isFinite(to)) continue
+        const from = Number(applied[key])
+        if (Number.isFinite(from) && Math.abs(from - to) < 1e-9) continue
+        changes.push({ key, from: Number.isFinite(from) ? from : null, to })
+      }
+      return changes
+    }
+
+    /**
+     * Split an intended change into what the host's echo says landed and what did not.
+     *
+     * Checked against `settings.thresholds` rather than assumed from a 200: this endpoint
+     * answers `ok: true` for a patch that merges to nothing, so "the request succeeded"
+     * and "the cut moved" are two different facts and only the second one is news.
+     *
+     * @param {Array<{key: string, to: number}>} changes - what was sent.
+     * @param {object} landed - `settings.thresholds` from the response.
+     */
+    function appliedNote (changes, landed) {
+      const moved = []
+      const missed = []
+      for (const change of changes) {
+        const now = Number(landed?.[change.key])
+        if (Number.isFinite(now) && Math.abs(now - change.to) < 1e-9) moved.push(change)
+        else missed.push(change)
+      }
+      return { moved, missed }
+    }
+
+    /** One change as `key 0.60 → 0.43`, with `—` for a key that had no cut before. */
+    const changeLabel = (change) => `${change.key} ${change.from === null ? '—' : change.from.toFixed(2)} → ${change.to.toFixed(2)}`
+
     const S = {
       zh: {
         title: 'Jev 决策工具箱',
@@ -128,6 +182,8 @@ window.__ModuleLoader__.load({
         thresholds: '阈值（语料拟合）',
         applyThresholds: '应用建议阈值',
         appliedThresholds: '已应用',
+        applyNothing: (n) => `没有可应用的改动：${n} 项拟合都是 ⚪/⬛（现值已是留出折最优，或分离度不足）——照改就是过拟合`,
+        applyWill: (list) => `将写入（合并，按轴刀口会保留）：${list}`,
         noThresholds: '还没有拟合结果。跑一次基准（POST /api/bench）后再来。',
         colCurrent: '现用',
         colSuggested: '建议',
@@ -189,6 +245,8 @@ window.__ModuleLoader__.load({
         thresholds: 'Thresholds (fitted from corpus)',
         applyThresholds: 'Apply suggested',
         appliedThresholds: 'applied',
+        applyNothing: (n) => `nothing to apply: all ${n} fits are ⚪/⬛ (already at the held-out optimum, or separation too low to trust)`,
+        applyWill: (list) => `will write (merged; per-axis cuts are kept): ${list}`,
         noThresholds: 'No fit recorded yet — run the benchmark (POST /api/bench) first.',
         colCurrent: 'current',
         colSuggested: 'suggested',
@@ -337,8 +395,18 @@ window.__ModuleLoader__.load({
         React.useEffect(() => { void load(days) }, [load, days])
         React.useEffect(() => { setLang(langOf(ctx)) }, [ctx])
 
-        /** Write one settings patch and report honestly whether it landed. */
-        const write = async (patch) => {
+        /**
+         * Write one settings patch and report honestly whether it landed.
+         *
+         * The reload runs **before** the note is set, and that order is the fix for a
+         * dead-looking button: `load()` clears the note when it succeeds, so a note set
+         * beforehand survived only as long as three localhost round trips and then
+         * vanished — a save that worked and a click that did nothing looked identical.
+         *
+         * @param {object} patch - the settings patch.
+         * @param {(body: object) => string} [report] - builds the note from the response.
+         */
+        const write = async (patch, report) => {
           try {
             const response = await fetch('/dsh-jev-kit/api/config', {
               method: 'POST',
@@ -347,8 +415,8 @@ window.__ModuleLoader__.load({
             })
             const body = await response.json().catch(() => ({}))
             if (!response.ok || body.ok !== true) { setNote(`${t.saveFailed}: ${body.error ?? response.status}`); return }
-            setNote(t.saved)
             await load(days)
+            setNote(report ? report(body) : t.saved)
           } catch (error) {
             setNote(`${t.saveFailed}: ${error && error.message ? error.message : error}`)
           }
@@ -357,6 +425,8 @@ window.__ModuleLoader__.load({
         const verdict = classify(report, t)
         const keyConfigured = status?.key?.configured === true
         const rows = verdict.rows
+        /** The apply-ready cuts that would really move something (often none — see `thresholdChanges`). */
+        const changes = thresholdChanges(thresholds)
 
         const children = [
           h('div', { key: 'head', style: label }, t.title),
@@ -390,15 +460,19 @@ window.__ModuleLoader__.load({
             button(t.keySave, keyDraft.trim() === '', async () => {
               const response = await fetch('/dsh-jev-kit/api/key', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: keyDraft.trim() }) })
               const body = await response.json().catch(() => ({}))
-              if (body.ok !== true) setNote(String(body.error ?? response.status))
-              else { setNote(`${t.keySaved} ${body.key?.fingerprint ?? ''}`); setKeyDraft('') }
+              // Reload first, then speak: `load()` clears the note when it succeeds, so a
+              // note set before it was gone before anyone could read it — the same race
+              // that made the apply button look dead.
+              if (body.ok !== true) { setNote(String(body.error ?? response.status)); await load(days); return }
               await load(days)
+              setNote(`${t.keySaved} ${body.key?.fingerprint ?? ''}`)
+              setKeyDraft('')
             }),
             button(t.keyClear, status?.key?.configured !== true, async () => {
               const response = await fetch('/dsh-jev-kit/api/key/clear', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
               const body = await response.json().catch(() => ({}))
-              setNote(body.ok === true ? t.keyCleared : String(body.error ?? response.status))
               await load(days)
+              setNote(body.ok === true ? t.keyCleared : String(body.error ?? response.status))
             }))))
 
         children.push(h('div', { key: 'controls', style: divider },
@@ -507,7 +581,19 @@ window.__ModuleLoader__.load({
                */
               ...(Object.entries(thresholds.applied ?? {}).filter(([key]) => key.includes('.'))
                 .map(([key, cut]) => h('div', { style: muted }, `${t.axisNote}：${key} ${Number(cut).toFixed(2)}`))),
-              h('div', { style: row }, button(t.applyThresholds, busy, () => { void write({ thresholds: thresholds.suggested }) })))))
+              h('div', { key: 'apply', style: row },
+                button(t.applyThresholds, busy || changes.length === 0, () => {
+                  void write({ thresholds: Object.fromEntries(changes.map((change) => [change.key, change.to])) }, (body) => {
+                    const { moved, missed } = appliedNote(changes, body?.settings?.thresholds)
+                    const parts = []
+                    if (moved.length) parts.push(`${t.appliedThresholds}：${moved.map(changeLabel).join(' · ')}`)
+                    if (missed.length) parts.push(`${t.saveFailed}（未落地：${missed.map((change) => change.key).join(', ')}）`)
+                    return parts.join(' · ') || t.saved
+                  })
+                }),
+                changes.length === 0
+                  ? h('span', { style: muted }, t.applyNothing((thresholds.details ?? []).length))
+                  : h('span', { style: muted }, t.applyWill(changes.map(changeLabel).join(' · ')))))))
 
         children.push(h('details', { key: 'catalogue', style: divider },
           h('summary', { style: label }, `${t.catalogue}（${status?.channels ?? 0}）`),
@@ -525,7 +611,7 @@ window.__ModuleLoader__.load({
       // React plus `fetch` is the whole dependency surface.
       inject: ['slots', 'locale'],
       /** Exposed for the offline smoke test: the colour rules are what can be wrong without looking wrong. */
-      __internals: { classify, toMarkdown, unwrapReport, S, MIN_SAMPLE },
+      __internals: { classify, toMarkdown, unwrapReport, S, MIN_SAMPLE, thresholdChanges, appliedNote, changeLabel },
       apply (ctx) {
         const slots = ctx.slots
         if (slots === undefined || typeof slots.inject !== 'function') return
