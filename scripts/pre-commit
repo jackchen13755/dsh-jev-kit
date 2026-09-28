@@ -5,8 +5,9 @@
 #   ① i18n: a new locale entry must not duplicate an existing meaning, and must not
 #      invent a second word for something the copy already names.
 #   ② scope: when a task is declared (`JEV_TASK` or a `.jev-task` file), each staged
-#      hunk is judged against it — "only change what was asked" as a check rather
-#      than a habit.
+#      source hunk is judged against it — "only change what was asked" as a check
+#      rather than a habit. Generated artifacts are left out; the reasons are measured
+#      and written next to the exclusion.
 #
 # Failure policy matches the pre-push hook: a check that cannot run warns and lets
 # the commit through (a gate that blocks when its service is down teaches people to
@@ -42,7 +43,46 @@ if [ -z "$task" ] && [ -f "$(git rev-parse --show-toplevel)/.jev-task" ]; then
   task="$(head -c 2000 "$(git rev-parse --show-toplevel)/.jev-task")"
 fi
 if [ -n "$task" ]; then
-  diff=$(git diff --cached --no-color -U0 || true)
+  # Generated artifacts are excluded, and the hunks keep real context. Both were
+  # measured on this repository (2026-09-28) against one self-consistent fix — one
+  # `client/client.js` change plus its compiled twin, a version bump, and the tests the
+  # task explicitly asked for:
+  #
+  #   · judged as it was (`units 32 / flagged 19`): every hunk, including those tests
+  #     and the version bump, with 7 of the 19 being `lib/client.js` — the twin of
+  #     `client/client.js` sitting beside it in the same commit. Whatever the task
+  #     says, the compiled copy of it cannot be a "drive-by addition" *as a separate
+  #     item*; judging it only spends a judgment and manufactures a finding.
+  #   · `-U0` hands the judge a bare run of added lines with no idea which function
+  #     they belong to. The same tests-only slice went **3/3 flagged at -U0 → 1/3 at
+  #     -U3**.
+  #
+  # A gate that flags the work it was handed teaches `JEV_ALLOW_COMMIT=1`, which is the
+  # failure the pre-push hook already warns about — and this is the same false positive
+  # `commit-msg` fixed for its own check ("15 of 15 source-map hunks came back
+  # unrelated"); this half never got the fix.
+  #
+  # The hole that leaves — a hand-edited artifact with nothing behind it — is closed in
+  # code below rather than by the model.
+  skip_pathspecs=(":(exclude)lib/" ":(exclude)dist/" ":(exclude)build/" ":(exclude)*.map" ":(exclude)*.min.js")
+  diff=$(git diff --cached --no-color -U"${JEV_SCOPE_CONTEXT:-3}" -- . "${skip_pathspecs[@]}" || true)
+
+  # Artifacts changed with nothing else staged: no task description justifies that, and
+  # the model no longer sees it — so the deterministic check says it here.
+  generated=$(git diff --cached --name-only -- lib/ dist/ build/ '*.map' '*.min.js' | sed -n '1,5p')
+  sources=$(git diff --cached --name-only -- . "${skip_pathspecs[@]}" | sed -n '1p')
+  if [ -n "$generated" ] && [ -z "$sources" ]; then
+    echo "jev-kit pre-commit: ⚠️ 只改了生成物、看不到对应源码改动——确认这不是手改的产物：" >&2
+    printf '%s\n' "$generated" | sed 's/^/    · /' >&2
+  fi
+
+  # `JEV_SCOPE_SHOW_DIFF=1` prints exactly what would be judged without spending a
+  # judgment: an exclusion is only worth having if it can be checked without a model.
+  if [ "${JEV_SCOPE_SHOW_DIFF:-0}" = "1" ]; then
+    printf '%s\n' "$diff"
+    exit 0
+  fi
+
   if [ -n "$diff" ]; then
     payload=$(DIFF="$diff" TASK="$task" python3 -c 'import json,os; print(json.dumps({"task": os.environ["TASK"], "diff": os.environ["DIFF"]}))' 2>/dev/null || true)
     if [ -n "$payload" ]; then
