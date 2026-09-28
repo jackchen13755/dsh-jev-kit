@@ -557,6 +557,22 @@ test('the card shows how well a score reads as a probability, and never invents 
     const unmeasured = scaleCells.find((node) => /未测/.test(node.props.title))
     assert.ok(unmeasured, 'an older record is reported as not measured')
     assert.equal(textOf(unmeasured), '—', 'and never as 0.00, which would read as perfect')
+    /*
+     * A row in `details` can never lack `calibration` for lack of samples: `fitThresholds`
+     * skips those channels *before* pushing a row. So the only cause is a record written by
+     * code that predates the metric, and blaming the sample size sent the reader off to
+     * collect fixtures for a channel that was never the problem.
+     */
+    assert.doesNotMatch(unmeasured.props.title, /样本|正负例/, 'do not blame a cause that cannot produce this row')
+    assert.match(unmeasured.props.title, /早于「刻度」功能/, 'name the actual cause and the fix')
+    /*
+     * `maxGap` is absent when no band had enough samples (MIN_BIN_N). Interpolating it
+     * unguarded printed "最大偏差 NaN" — the one cell whose whole job is to say "not
+     * measured" instead said a number.
+     */
+    const thinBins = find(tree, (node) => node.type === 'td' && /Brier/.test(node.props.title ?? '')).map((node) => node.props.title)
+    assert.equal(thinBins.some((title) => /NaN|undefined/.test(title)), false, 'no NaN in a tooltip')
+    assert.equal(thinBins.some((title) => /最大偏差 —/.test(title)), true, 'the unmeasurable gap says so in words')
   } finally {
     delete globalThis.fetch
   }
