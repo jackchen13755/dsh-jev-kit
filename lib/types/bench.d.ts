@@ -1,4 +1,5 @@
 import { type ChannelState, type Verdict } from './channels.js';
+import { type Calibration } from './calibration.js';
 import type { JevAnswer, JevQuestion } from '@dsh-external/dsh-jev-core';
 export type Expectation = 
 /** The primary field should come out above the channel's threshold. */
@@ -115,6 +116,16 @@ export interface ThresholdFit {
     separation: number | undefined;
     /** True when the fitted cut is worth acting on (enough separation to trust it). */
     trustworthy: boolean;
+    /**
+     * Does the score mean what the cut assumes it means? (see `calibration.ts`)
+     *
+     * Measured on the *same* pairs the cut was fitted from, because the interesting
+     * claim — "separation is good, the cut is just in the wrong place" — reads as an
+     * explanation of a low pass rate and had never been checked. Absent when the
+     * channel has too few scored fixtures for both classes, which is also when a fit
+     * is skipped: an unmeasured calibration must not render as a good one.
+     */
+    calibration?: Calibration;
 }
 /**
  * A short fingerprint of a channel's wording.

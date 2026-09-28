@@ -508,6 +508,60 @@ test('an apply whose key did not land says so instead of claiming a save', async
   }
 })
 
+test('the card shows how well a score reads as a probability, and never invents one', async () => {
+  /*
+   * The bench now measures the scale (`Brier` / skill against the corpus own base rate),
+   * and a measurement nobody can see is a measurement nobody uses. Two rules are worth
+   * a test of their own:
+   *
+   *   · a record written before the metric existed has **no** `calibration`, and the cell
+   *     must say "not measured" — rendering `0.00` there would read as a perfect score;
+   *   · a bad scale must not be painted as a broken channel, because the repair that
+   *     suggests (move the cut toward 0.5) is the false-positive storm.
+   */
+  const { React, mount } = liveReact()
+  const bodies = {
+    '/dsh-jev-kit/api/status': { version: '0.17.3', enabled: true, channels: 24, key: { configured: true, source: 'credential:file' }, budget: {} },
+    '/dsh-jev-kit/api/report?days=7': { ok: true, days: 7, report: { total: 1, window: { days: 7 }, channels: [] } },
+    '/dsh-jev-kit/api/thresholds': {
+      ok: true,
+      applied: {},
+      suggested: {},
+      details: [
+        {
+          channel: 'private_scan', current: 0.06, recommended: 0.06, accuracyNow: 1, accuracyFitted: 1, accuracyCrossVal: 0.983, n: 58, separation: 1, trustworthy: false, changes: false, level: 'optimal',
+          calibration: { n: 58, baseRate: 0.5, brier: 0.0299, baseline: 0.25, skill: 0.8804, ece: 0.0565, maxGap: 0.505, qualified: 4, thin: 0, bins: [], outOfRange: 0, unusable: 0 },
+        },
+        {
+          channel: 'sufficient', current: 0.8, recommended: 0.8, accuracyNow: 0.667, accuracyFitted: 0.667, accuracyCrossVal: 0.667, n: 12, separation: 0.99, trustworthy: false, changes: false, level: 'optimal',
+          // Brier 0.247 against its own baseline 0.25: the scale carries no information.
+          calibration: { n: 12, baseRate: 0.5, brier: 0.247, baseline: 0.25, skill: 0.012, ece: 0.2688, maxGap: undefined, qualified: 1, thin: 2, bins: [], outOfRange: 0, unusable: 0 },
+        },
+        // A record from before this metric existed: no calibration field at all.
+        { channel: 'risk', current: 0.6, recommended: 0.6, accuracyNow: 0.9, accuracyFitted: 0.9, accuracyCrossVal: 0.9, n: 22, separation: 0.95, trustworthy: false, changes: false, level: 'optimal' },
+      ],
+    },
+  }
+  globalThis.fetch = async (url) => ({ ok: true, json: async () => bodies[String(url)] })
+  try {
+    const { seats } = await boot({ react: React })
+    const tree = await mount(seats['jev-kit'])
+    const text = textOf(tree)
+    assert.match(text, /刻度/, 'the column is there')
+    assert.match(text, /刻度 = 分数当概率读有多准/, 'and explains itself')
+    assert.match(text, /别因为刻度差就把刀口挪向 0\.5/, 'including the repair it must not suggest')
+    const scaleCells = find(tree, (node) => node.type === 'td' && typeof node.props.title === 'string' && node.props.title.length > 0)
+    const titles = scaleCells.map((node) => node.props.title)
+    assert.equal(titles.some((title) => /Brier 0\.030/.test(title)), true, 'the measured channel carries its number')
+    assert.equal(titles.some((title) => /技能 0\.01/.test(title)), true, 'and the skill against its own baseline')
+    const unmeasured = scaleCells.find((node) => /未测/.test(node.props.title))
+    assert.ok(unmeasured, 'an older record is reported as not measured')
+    assert.equal(textOf(unmeasured), '—', 'and never as 0.00, which would read as perfect')
+  } finally {
+    delete globalThis.fetch
+  }
+})
+
 test('the bundle is a ModuleLoader bundle, not an ES module', () => {
   const source = fs.readFileSync(bundlePath, 'utf8')
   assert.match(source, /__ModuleLoader__\.load\(/)
