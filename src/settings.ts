@@ -120,6 +120,53 @@ export interface KitSettings {
    * defaults, which is not the same as "no opinion": a cut is always in force.
    */
   thresholds: Record<string, number>
+  /**
+   * Per-*engine* cuts, layered over `thresholds` when that engine answers.
+   *
+   * A cut is calibrated against the engine that produced the probability, and the
+   * engines do not share a scale: on the 317-fixture corpus AgentJev-0.6B orders
+   * `retry` at separation 0.93 but cuts at 0.16 where the hosted engine cuts at
+   * 0.60. Without this map, `engineByChannel` and the fallback would judge local
+   * answers with hosted cuts — reported as sorting high, actually flagging almost
+   * everything, which is the 2026-09-23 false-positive storm again.
+   *
+   * Keys are engine ids; values are the same channel/axis keys as `thresholds`
+   * (including per-axis ones such as `private_scan.internal`). A key this map does
+   * not name keeps the value from `thresholds`, so an engine override is partial
+   * by construction rather than a replacement that silently drops the rest.
+   */
+  engineThresholds: Record<string, Record<string, number>>
+  /**
+   * Engines in priority order; the first one serves interactive judgments.
+   */
+  engines: string[]
+  /** Local decision engine (Laya) endpoint, empty when none is running. */
+  layaEndpoint: string
+  /** Local AgentJev-0.6B endpoint — it speaks its own contract (see `engines.ts`). */
+  agentjevEndpoint: string
+  /**
+   * Engine that answers when the routed one cannot, by id, or empty for no fallback.
+   *
+   * Measured on 2026-09-28 with the full 317-fixture suite: the hosted engine needs
+   * 28–32 s for the suite and p50 ~320 ms per call, the local AgentJev-0.6B 122.5 s
+   * and p50 1015 ms — but in one window 64 of 317 hosted calls blew the 8 s budget
+   * and the suite took 276 s. The local engine cannot time out on a network it does
+   * not use, so it is the availability floor: when the hosted engine short-circuits
+   * (breaker), has no key, or errors out, a qualifying channel gets an answer
+   * instead of "not judged" — marked as a fallback everywhere it is reported.
+   *
+   * Auth rejection is deliberately *not* a fallback trigger: a bad key is a
+   * configuration fault a human must see, not an outage to paper over.
+   */
+  fallbackEngine: string
+  /**
+   * Channels the fallback may serve, by id. Empty means every channel.
+   *
+   * Defaulted to the channels whose local fit cleared the benchmark's own
+   * cross-validation gate (`retry` 90%, `private_scan` 81%); `scope_check`'s local
+   * fit scored 55% and is therefore excluded, separation notwithstanding.
+   */
+  fallbackChannels: string[]
 }
 
 export const KIT_DEFAULTS: KitSettings = {
@@ -151,6 +198,19 @@ export const KIT_DEFAULTS: KitSettings = {
   localStateChars: 600,
   localMaxItems: 12,
   thresholds: {},
+  /*
+   * The local engine's own cuts, from the 2026-09-28 run of the full suite
+   * (`node run-suite.mjs --state-chars 600` against the kit's own fixtures). Only
+   * the fits that cleared cross-validation are shipped: `retry` 0.16 (cv 90%) and
+   * `private_scan` 0.63 (cv 81%). `scope_check` fitted 0.86 at cv 55% and
+   * `sufficient` separated at 0.44, so neither is routed here or defaulted.
+   */
+  engineThresholds: { agentjev: { retry: 0.16, private_scan: 0.63 } },
+  engines: ['jev'],
+  layaEndpoint: 'http://127.0.0.1:8791',
+  agentjevEndpoint: 'http://127.0.0.1:8149',
+  fallbackEngine: 'agentjev',
+  fallbackChannels: ['retry', 'private_scan'],
   disabledChannels: [],
   defaultRepo: '',
 }
@@ -188,6 +248,23 @@ export function validate (value: KitSettings): string | undefined {
   }
   for (const [channel, cut] of Object.entries(value.thresholds ?? {})) {
     if (typeof cut !== 'number' || !Number.isFinite(cut) || cut < 0 || cut > 1) return `thresholds.${channel} 必须在 0–1 之间（当前 ${JSON.stringify(cut)}）`
+  }
+  for (const engine of value.engines ?? []) {
+    if (typeof engine !== 'string' || !/^[a-z][a-z0-9_-]*$/.test(engine)) return `engines 里必须是引擎 id（当前 ${JSON.stringify(engine)}）`
+  }
+  for (const [engine, cuts] of Object.entries(value.engineThresholds ?? {})) {
+    if (!/^[a-z][a-z0-9_-]*$/.test(engine)) return `engineThresholds 的键必须是引擎 id（当前 ${JSON.stringify(engine)}）`
+    for (const [channel, cut] of Object.entries(cuts ?? {})) {
+      if (typeof cut !== 'number' || !Number.isFinite(cut) || cut < 0 || cut > 1) return `engineThresholds.${engine}.${channel} 必须在 0–1 之间（当前 ${JSON.stringify(cut)}）`
+    }
+  }
+  if (value.fallbackEngine && !/^[a-z][a-z0-9_-]*$/.test(value.fallbackEngine)) return `fallbackEngine 必须是引擎 id（当前 ${JSON.stringify(value.fallbackEngine)}）`
+  for (const channel of value.fallbackChannels ?? []) {
+    if (!/^[a-z][a-z0-9_:-]*$/.test(channel)) return `fallbackChannels 里有不合法的通道名：${JSON.stringify(channel)}`
+  }
+  for (const [field, endpoint] of [['layaEndpoint', value.layaEndpoint], ['agentjevEndpoint', value.agentjevEndpoint]] as const) {
+    if (typeof endpoint !== 'string') return `${field} 必须是字符串`
+    if (endpoint && !/^https?:\/\/\S+$/.test(endpoint)) return `${field} 必须是 http(s) URL（当前 ${JSON.stringify(endpoint)}）`
   }
   for (const [field, [min, max]] of Object.entries(BOUNDS)) {
     const number = (value as unknown as Record<string, unknown>)[field]
@@ -240,6 +317,38 @@ export function merge (base: KitSettings, patch: unknown): KitSettings {
     }
     out.engineByChannel = routes
   }
+  if (input.engineThresholds && typeof input.engineThresholds === 'object') {
+    /*
+     * Merged per engine *and* per channel, for the reason `thresholds` is merged:
+     * applying one engine's fitted table must not delete the other engine's, and
+     * naming one channel must not drop the rest. `null` deletes, as above.
+     */
+    const perEngine: Record<string, Record<string, number>> = {}
+    for (const [engine, cuts] of Object.entries(base.engineThresholds ?? {})) perEngine[engine] = { ...cuts }
+    for (const [engine, cuts] of Object.entries(input.engineThresholds as Record<string, unknown>)) {
+      if (cuts === null) { delete perEngine[engine]; continue }
+      if (!cuts || typeof cuts !== 'object') continue
+      const merged = { ...(perEngine[engine] ?? {}) }
+      for (const [channel, cut] of Object.entries(cuts as Record<string, unknown>)) {
+        if (cut === null) { delete merged[channel]; continue }
+        if (typeof cut === 'number' && Number.isFinite(cut) && cut >= 0 && cut <= 1) merged[channel] = cut
+      }
+      perEngine[engine] = merged
+    }
+    out.engineThresholds = perEngine
+  }
+  if (Array.isArray(input.engines)) out.engines = input.engines.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map(x => x.trim())
+  if (Array.isArray(input.fallbackChannels)) out.fallbackChannels = input.fallbackChannels.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map(x => x.trim())
+  if (typeof input.fallbackEngine === 'string') out.fallbackEngine = input.fallbackEngine.trim()
+  /*
+   * The two local endpoints are settable through the API on purpose: the card had no
+   * way to point the kit at a local engine, so `layaEndpoint` could only be changed by
+   * editing the stored config and restarting the host (measured 2026-09-28: a settings
+   * POST with this key was silently dropped by this whitelist). The hosted `endpoint`
+   * and `model` stay file-only — a typo there breaks every channel at once.
+   */
+  if (typeof input.layaEndpoint === 'string') out.layaEndpoint = input.layaEndpoint.trim()
+  if (typeof input.agentjevEndpoint === 'string') out.agentjevEndpoint = input.agentjevEndpoint.trim()
   for (const field of Object.keys(BOUNDS) as Array<keyof KitSettings>) {
     const value = input[field]
     if (typeof value === 'number' && Number.isFinite(value)) (out[field] as number) = value

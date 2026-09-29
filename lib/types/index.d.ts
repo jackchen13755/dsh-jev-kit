@@ -32,10 +32,6 @@ export interface Config extends KitSettings {
     apiKeyFile: string;
     ledgerDir: string;
     redact: boolean;
-    /** Engines in priority order; the first one serves interactive judgments. */
-    engines: string[];
-    /** Local decision engine (Laya) endpoint, empty when none is running. */
-    layaEndpoint: string;
 }
 /**
  * Structural view of `clientModules` — only the one repair this plugin needs.

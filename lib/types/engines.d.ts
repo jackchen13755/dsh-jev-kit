@@ -61,6 +61,31 @@ export declare function layaEngine(options: {
     endpoint: string;
 }): Engine;
 /**
+ * The third engine: AgentJev-0.6B, a local System One model with its **own** contract.
+ *
+ *   POST <endpoint>/api/evaluate
+ *   { "state": {...}, "questions": [ { "id", "type": "boolean"|"choice"|"score", ... } ] }
+ *   → { "results": [ { "answers": [ { "id", "type", "probability"|"value"|"score", … } ] } ],
+ *       "usage": { "wall_ms": 462.2, "generated_tokens": 0 } }
+ *
+ * Laya spoke the kit's own shape because that shim was ours to write; AgentJev is a
+ * published server (github.com/malevrigns/agent-jev) whose contract is a list of
+ * typed questions, so the translation lives here and no external adapter is needed.
+ * Measured on this machine (M2/16G, MPS, fp32, 317 fixtures): 122.5 s for the whole
+ * suite at concurrency 4, p50 1015 ms per call, ~2.6 calls/s — slower per call than
+ * the hosted engine (p50 ~320 ms) and behind it on quality, which is why it ships as
+ * a **fallback**, not as the primary engine.
+ */
+export declare function toAgentJevQuestions(questions: Record<string, JevQuestion>): Array<Record<string, unknown>>;
+/** Normalise one AgentJev response into the kit's answer shape. */
+export declare function fromAgentJevAnswers(body: unknown): {
+    answers: Record<string, JevAnswer>;
+    ms: number;
+};
+export declare function agentJevEngine(options: {
+    endpoint: string;
+}): Engine;
+/**
  * Shrink a state to what a local engine can afford to read.
  *
  * Measured on an M2 with the ONNX English checkpoint: a 22-character state costs

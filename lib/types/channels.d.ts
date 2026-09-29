@@ -25,6 +25,23 @@ import type { JevAnswer, JevQuestion } from '@dsh-external/dsh-jev-core';
 export declare function setReaderThresholds(map: Record<string, number> | undefined): void;
 /** The effective cut for a channel inside a reader: override, else the literal default. */
 export declare function readerThreshold(channel: string, fallback: number): number;
+/**
+ * Read one verdict under a *different* cut table, then put the old one back.
+ *
+ * A cut is calibrated against the engine that produced the probability, and two
+ * engines here do not share a scale: on the 317-fixture corpus the local
+ * AgentJev-0.6B orders `retry` at separation 0.93 but places its cut at 0.16,
+ * where the hosted engine's is 0.60. Reading a local answer with the hosted cut
+ * is how a ranking signal gets used as a probability — the false-positive storm
+ * this project already shipped once (2026-09-23), and the reason `engineByChannel`
+ * needed a companion knob rather than only a route.
+ *
+ * The swap is safe under concurrency 4 because readers are synchronous by
+ * construction: no `await` can land between the two assignments.
+ */
+export declare function withReaderThresholds<T>(map: Record<string, number> | undefined, read: () => T): T;
+/** The cut table currently in force — for status output and for tests. */
+export declare const readerThresholds: () => Record<string, number>;
 /** Which part of the catalogue a channel belongs to. `P` is the priority set. */
 export type ChannelGroup = 'P' | 'A' | 'B' | 'C' | 'D';
 /** How one judgment is read. */

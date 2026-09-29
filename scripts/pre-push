@@ -22,13 +22,36 @@
 #   bash scripts/install-hooks.sh
 #
 # Environment:
-#   JEV_KIT_ENDPOINT   default http://127.0.0.1:3080/dsh-jev-kit/api/scan-private
+#   JEV_KIT_ENDPOINT   full scan URL (wins over everything below)
+#   JEV_KIT_BASE       full base URL, e.g. http://127.0.0.1:19387/dsh-jev-kit
+#   JEV_KIT_PORT       try this port first (default probe order: 19387, then 3080)
 #   JEV_SKIP_PRIVACY=1 skip this hook entirely (no request is made)
 #   JEV_ALLOW_PUSH=1   run the scan, report findings, but do not block
 #
 set -uo pipefail
 
-ENDPOINT="${JEV_KIT_ENDPOINT:-http://127.0.0.1:3080/dsh-jev-kit/api/scan-private}"
+# Endpoint resolution.
+#
+# The kit's routes are served by whichever host runs the plugin: the desktop app's
+# webserver listens on 19387, while `dsh web` historically used 3080. A hardcoded
+# port does not fail loudly — the semantic layer fails *open* (warn and allow), so a
+# moved port turns half the gate off without anyone noticing, which is exactly the
+# invisible-gate failure this hook exists to prevent.
+#
+# Probe instead: GET /api/thresholds is cheap, needs no model call, and 200 means the
+# kit is really there (curl exits 0 on a 404 too, so the status code — not the exit
+# code — is what decides).
+kit_base="${JEV_KIT_BASE:-}"
+if [ -z "$kit_base" ]; then
+  for candidate in ${JEV_KIT_PORT:+$JEV_KIT_PORT} 19387 3080; do
+    probe="http://127.0.0.1:${candidate}/dsh-jev-kit"
+    code=$(curl -s -o /dev/null -w '%{http_code}' -m 2 "${probe}/api/thresholds" 2>/dev/null || echo 000)
+    [ "$code" = "200" ] && { kit_base="$probe"; break; }
+  done
+fi
+kit_base="${kit_base:-http://127.0.0.1:19387/dsh-jev-kit}"
+ENDPOINT="${JEV_KIT_ENDPOINT:-${kit_base}/api/scan-private}"
+ACTED_ENDPOINT="${JEV_KIT_ACTED_ENDPOINT:-${kit_base}/api/acted}"
 [ "${JEV_SKIP_PRIVACY:-0}" = "1" ] && exit 0
 
 # The hook's stdin is one line per ref being pushed:
@@ -137,7 +160,7 @@ previous=""
 report_acted () {
   [ -n "$previous" ] || return 0
   [ "$previous" = "$fingerprint" ] && return 0
-  curl -sS -m 15 -X POST "${JEV_KIT_ACTED_ENDPOINT:-http://127.0.0.1:3080/dsh-jev-kit/api/acted}" \
+  curl -sS -m 15 -X POST "$ACTED_ENDPOINT" \
     -H 'content-type: application/json' \
     -d "$(CH="$1" python3 -c 'import json,os; print(json.dumps({"channel": os.environ["CH"], "entry": "hook", "note": "上次拦下的内容已改，复扫为 0"}))' 2>/dev/null)" \
     >/dev/null 2>&1 || true

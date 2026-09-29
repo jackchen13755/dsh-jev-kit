@@ -7,7 +7,7 @@ export type LedgerRecord = {
     /** The verdict's headline numbers (probabilities, choices, scores). */
     values: Record<string, number | string | undefined>;
     ms?: number;
-    via?: 'jev' | 'cache';
+    via?: string;
     chars: number;
     item?: number;
     /**
@@ -45,11 +45,14 @@ export type LedgerRecord = {
     kind: 'degraded';
     channel: string;
     reason: string;
-} | {
+}
+/** `engine` names which engine failed, now that more than one can be routed to. */
+ | {
     t: number;
     kind: 'error';
     channel: string;
     message: string;
+    engine?: string;
 }
 /**
  * Somebody reported, after the fact, whether the advice was acted on.

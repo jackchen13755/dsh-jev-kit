@@ -30,13 +30,13 @@ import {
   createBreaker, createLimiter, percentiles,
   createCache, keyOf,
   serviceOf,
-  type CredentialsService, type Jev, type JevQuestion, type Logger,
+  type CredentialsService, type Jev, type JevAnswer, type JevQuestion, type Logger,
   type WebRequestLike, type WebResponseLike, type WebServerLike,
 } from '@dsh-external/dsh-jev-core'
-import { CHANNEL_LIST, channelOf, setReaderThresholds, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
+import { CHANNEL_LIST, channelOf, setReaderThresholds, withReaderThresholds, type ChannelSpec, type ChannelState, type Verdict } from './channels.js'
 import { MAX_UNIT_CHARS, hunksOf, textUnits, unitsOf, type Unit } from './segments.js'
 import { keptText, planPrune, summarizeDecisions } from './prune.js'
-import { jevEngine, layaEngine, selectEngines, trimState, type Engine } from './engines.js'
+import { agentJevEngine, jevEngine, layaEngine, selectEngines, trimState, type Engine } from './engines.js'
 import { FIXTURES, check, questionsFor, renderBench, summarizeEngine, verdictFor, fittedTable, fitVerdictOf, setThresholdOverrides, thresholdOverrides, thresholdOf, questionHash, questionHashes, wordingDrift, type BenchRecord, type Fixture, type ThresholdFit, type Trial } from './bench.js'
 import { append, load, render, summarize, type LedgerRecord } from './ledger.js'
 import { KIT_DEFAULTS, autoPlan, loadStored, merge, saveStored, validate, type KitSettings } from './settings.js'
@@ -82,10 +82,6 @@ export interface Config extends KitSettings {
   apiKeyFile: string
   ledgerDir: string
   redact: boolean
-  /** Engines in priority order; the first one serves interactive judgments. */
-  engines: string[]
-  /** Local decision engine (Laya) endpoint, empty when none is running. */
-  layaEndpoint: string
 }
 
 const DEFAULTS: Config = {
@@ -97,8 +93,6 @@ const DEFAULTS: Config = {
   apiKeyFile: '',
   ledgerDir: '',
   redact: true,
-  engines: ['jev'],
-  layaEndpoint: 'http://127.0.0.1:8791',
 }
 
 /**
@@ -119,7 +113,13 @@ interface ItemResult {
   where: string
   verdict: Verdict
   ms?: number
-  via: 'jev' | 'cache'
+  /**
+   * Which engine produced this verdict: an engine id, `cache`, or
+   * `fallback:<engine>` when the routed engine could not answer. Never inferred at
+   * render time — a verdict bought from the local model must not read as the
+   * hosted engine's.
+   */
+  via: string
   chars: number
 }
 
@@ -239,6 +239,7 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     return [
       jevEngine(async () => await ensureJev()),
       layaEngine({ endpoint: config.layaEndpoint }),
+      agentJevEngine({ endpoint: config.agentjevEndpoint }),
     ]
   }
 
@@ -261,6 +262,38 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     const { engines, unknown } = selectEngines([wanted], knownEngines())
     const routed = engines[0]
     return routed ? { engine: routed, unknown } : { ...primaryEngine(), unknown }
+  }
+
+  /**
+   * The engine that answers when the routed one cannot, or `undefined` for none.
+   *
+   * Two gates, both needed: the setting must name an engine this build knows and
+   * that is not already the routed one, and the channel must be on the list — a
+   * fallback that fires everywhere would spend a weaker reader on channels where it
+   * was measured to lose (`sufficient` 0.44 separation, `memory_write` 0.69).
+   * Reachability is checked at the moment of failure, not here: a local server that
+   * is not running must cost nothing.
+   */
+  function fallbackFor (channelId: string, routed: Engine): Engine | undefined {
+    const wanted = config.fallbackEngine.trim()
+    if (!wanted) return undefined
+    const allowed = config.fallbackChannels ?? []
+    if (allowed.length && !allowed.includes(channelId)) return undefined
+    const { engines } = selectEngines([wanted], knownEngines())
+    const engine = engines[0]
+    return engine && engine.id !== routed.id ? engine : undefined
+  }
+
+  /**
+   * The cut table one engine's answer must be read with.
+   *
+   * `thresholds` is calibrated against the primary engine; `engineThresholds[id]`
+   * layers that engine's own fits on top. A key the engine map does not name keeps
+   * the base value, so a partial table stays partial instead of silently reverting
+   * the hand-measured per-axis cuts.
+   */
+  function cutsFor (engine: Engine): Record<string, number> {
+    return { ...(config.thresholds ?? {}), ...(config.engineThresholds?.[engine.id] ?? {}) }
   }
 
   function authBlocked (): boolean {
@@ -320,17 +353,15 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
     /*
      * The engine is part of the key for the same reason: two engines can answer the same
      * question differently, so a verdict bought from one must not be served to the other.
+     * So is the cut table that will read the answer — per-engine fits move independently
+     * of the base map, and a key holding only `config.thresholds` would replay a verdict
+     * computed under the engine's previous cuts.
      */
-    const cacheKey = keyOf([channel.id, VERSION, engine.id, questionHash(channel.id), config.thresholds, prep(JSON.stringify(channelState))])
+    const cacheKey = keyOf([channel.id, VERSION, engine.id, questionHash(channel.id), cutsFor(engine), prep(JSON.stringify(channelState))])
     const cached = cache.get(cacheKey)
     if (cached) {
       append(ledgerDir, { t: Date.now(), kind: 'decision', channel: channel.id, group: channel.group, level: cached.verdict.level, values: cached.verdict.values, via: 'cache', chars, ms: cached.ms, session })
       return { where: '', verdict: cached.verdict, via: 'cache', chars }
-    }
-    if (engine.id === 'jev') {
-      if (authBlocked()) { append(ledgerDir, { t: Date.now(), kind: 'degraded', channel: channel.id, reason: `auth:rejected-${auth.status}` }); return fail(`凭据被拒（auth:rejected-${auth.status}）`) }
-      if (!(await ensureJev())) { reason('no-key'); append(ledgerDir, { t: Date.now(), kind: 'degraded', channel: channel.id, reason: 'no-key' }); return fail('没有解析到 key') }
-      if (breaker.isOpen()) { reason('degraded:breaker-open'); append(ledgerDir, { t: Date.now(), kind: 'degraded', channel: channel.id, reason: 'degraded:breaker-open' }); return fail('熔断器打开（连续失败后短路）') }
     }
     if (!budgetOk(session)) { append(ledgerDir, { t: Date.now(), kind: 'degraded', channel: channel.id, reason: 'budget' }); return fail('超出预算上限') }
 
@@ -352,36 +383,103 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
      * so its state is capped. The hosted engine keeps everything: truncating there
      * would trade information for a cost it does not have.
      */
-    const payload = engine.id === 'jev'
-      ? redacted
-      : trimState(redacted, { maxChars: config.localStateChars, maxItems: config.localMaxItems }).state
+    const payloadFor = (target: Engine): Record<string, unknown> =>
+      target.id === 'jev'
+        ? redacted
+        : trimState(redacted, { maxChars: config.localStateChars, maxItems: config.localMaxItems }).state
 
-    let answer
-    try {
-      const timedOut = lane === 'foreground' ? config.foregroundTimeoutMs : config.requestTimeoutMs
-      const laneLimiter = lane === 'foreground' ? fgLimiter : limiter
-      answer = await laneLimiter.run(() => engine.ask(payload, questions, { timeoutMs: timedOut }))
-    } catch (error) {
-      noteAuthFailure(error)
-      breaker.fail()
-      const message = error instanceof Error ? error.message : String(error)
-      reason(error instanceof JevError && error.status === 401 ? 'error:auth' : 'error:request')
-      append(ledgerDir, { t: Date.now(), kind: 'error', channel: channel.id, message })
-      /*
-       * Name the two causes a reader can act on, because the raw 400 is the one that
-       * looks like a clean answer: `max_tokens_exceeded` means this unit was never
-       * judged (see `MAX_STATE_CHARS`), not that it was found clean.
-       */
-      return fail(message.includes('max_tokens_exceeded')
-        ? `单条状态超出模型上限（${chars} 字符）——这条**没有被判定**，不是"没问题"`
-        : `请求失败（${message.slice(0, 120)}）`)
+    const timedOut = lane === 'foreground' ? config.foregroundTimeoutMs : config.requestTimeoutMs
+    const laneLimiter = lane === 'foreground' ? fgLimiter : limiter
+
+    /**
+     * One attempt against one engine.
+     *
+     * `fatal` marks a failure the fallback must not paper over: a rejected credential
+     * is a configuration fault a human has to see, not an outage. The hosted-only
+     * preconditions (key, breaker) live here too, because they are per-engine and the
+     * fallback engine has none of them.
+     */
+    const attempt = async (target: Engine): Promise<{ ok: true, answer: { answers: Record<string, JevAnswer>, ms: number } } | { ok: false, why: string, fatal?: boolean }> => {
+      if (target.id === 'jev') {
+        if (authBlocked()) {
+          append(ledgerDir, { t: Date.now(), kind: 'degraded', channel: channel.id, reason: `auth:rejected-${auth.status}` })
+          return { ok: false, why: `凭据被拒（auth:rejected-${auth.status}）`, fatal: true }
+        }
+        if (!(await ensureJev())) {
+          reason('no-key')
+          append(ledgerDir, { t: Date.now(), kind: 'degraded', channel: channel.id, reason: 'no-key' })
+          return { ok: false, why: '没有解析到 key' }
+        }
+        if (breaker.isOpen()) {
+          reason('degraded:breaker-open')
+          append(ledgerDir, { t: Date.now(), kind: 'degraded', channel: channel.id, reason: 'degraded:breaker-open' })
+          return { ok: false, why: '熔断器打开（连续失败后短路）' }
+        }
+      }
+      try {
+        const answer = await laneLimiter.run(() => target.ask(payloadFor(target), questions, { timeoutMs: timedOut }))
+        if (target.id === 'jev') { breaker.ok(); auth.fingerprint = '' }
+        return { ok: true, answer }
+      } catch (error) {
+        if (target.id === 'jev') { noteAuthFailure(error); breaker.fail() }
+        const message = error instanceof Error ? error.message : String(error)
+        reason(error instanceof JevError && error.status === 401 ? 'error:auth' : 'error:request')
+        append(ledgerDir, { t: Date.now(), kind: 'error', channel: channel.id, engine: target.id, message })
+        /*
+         * Name the two causes a reader can act on, because the raw 400 is the one that
+         * looks like a clean answer: `max_tokens_exceeded` means this unit was never
+         * judged (see `MAX_STATE_CHARS`), not that it was found clean.
+         */
+        return {
+          ok: false,
+          why: message.includes('max_tokens_exceeded')
+            ? `单条状态超出模型上限（${chars} 字符）——这条**没有被判定**，不是"没问题"`
+            : `请求失败（${message.slice(0, 120)}）`,
+        }
+      }
     }
-    breaker.ok()
-    auth.fingerprint = ''
-    const verdict = channel.read(answer.answers, channelState)
-    cache.set(cacheKey, { verdict, ms: answer.ms })
-    append(ledgerDir, { t: Date.now(), kind: 'decision', channel: channel.id, group: channel.group, level: verdict.level, values: verdict.values, via: 'jev', ms: answer.ms, chars, session, qh: questionHash(channel.id) })
-    return { where: '', verdict, ms: answer.ms, via: 'jev', chars }
+
+    /*
+     * The routed engine first, the fallback only if it cannot answer.
+     *
+     * Measured 2026-09-28 (317 fixtures, concurrency 4): the hosted engine needs 28–32 s
+     * for the suite at p50 ~320 ms per call, the local AgentJev-0.6B 122.5 s at p50
+     * 1015 ms — but one window lost 64 of 317 calls to the 8 s budget and the suite took
+     * 276 s. A local engine cannot time out on a network it does not use, so on failure
+     * the qualifying channels answer locally instead of reporting "not judged".
+     */
+    const candidates: Engine[] = [engine]
+    const fallback = fallbackFor(channel.id, engine)
+    if (fallback) candidates.push(fallback)
+
+    let answered: { engine: Engine, answer: { answers: Record<string, JevAnswer>, ms: number } } | undefined
+    let failure = ''
+    for (const [index, target] of candidates.entries()) {
+      if (index > 0 && !(await target.available().catch(() => false))) {
+        reason(`fallback-unavailable:${target.id}`)
+        append(ledgerDir, { t: Date.now(), kind: 'degraded', channel: channel.id, reason: `fallback-unavailable:${target.id}` })
+        failure = `${failure}；本地兜底 ${target.id} 不可用`
+        break
+      }
+      const result = await attempt(target)
+      if (result.ok) { answered = { engine: target, answer: result.answer }; break }
+      failure = result.why
+      if (result.fatal) break
+    }
+    if (!answered) return fail(failure)
+    const used = answered.engine
+    const answer = answered.answer
+
+    /*
+     * Read the answer with the cuts of the engine that produced it, and cache only what
+     * the routed engine answered: a cached fallback verdict would keep answering after
+     * the hosted engine recovered, which is the one thing a fallback must not do.
+     */
+    const via = used.id === engine.id ? used.id : `fallback:${used.id}`
+    const verdict = withReaderThresholds(cutsFor(used), () => channel.read(answer.answers, channelState))
+    if (used.id === engine.id) cache.set(cacheKey, { verdict, ms: answer.ms })
+    append(ledgerDir, { t: Date.now(), kind: 'decision', channel: channel.id, group: channel.group, level: verdict.level, values: verdict.values, via, ms: answer.ms, chars, session, qh: questionHash(channel.id) })
+    return { where: '', verdict, ms: answer.ms, via, chars }
   }
 
   /** Judge every unit, bounded by item count and by the call's own budget. */
@@ -460,13 +558,26 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
   const sessionOf = (exec: unknown): string =>
     (exec as { agent?: { session?: { id?: string } } })?.agent?.session?.id ?? 'unknown'
 
+  /**
+   * How a verdict's provenance reads next to the headline.
+   *
+   * A fallback verdict must never look like the routed engine's: it was bought from a
+   * weaker reader after that engine failed, and the reader of the output is the person
+   * deciding whether to trust it. `cache` was already marked here for the same reason.
+   */
+  function viaMark (via: string): string {
+    if (via === 'cache') return '（缓存）'
+    if (via.startsWith('fallback:')) return `（本地兜底 ${via.slice('fallback:'.length)}）`
+    return ''
+  }
+
   function renderCall (result: CallResult, note?: string): string {
     const head = [`**${result.channel}** · ${result.title}`, note ?? ''].filter(Boolean)
     const body: string[] = []
     for (const item of result.items) {
       const icon = item.verdict.level === 'flag' ? '⛔' : item.verdict.level === 'warn' ? '⚠️' : item.verdict.level === 'ok' ? '✓' : '·'
       const where = item.where ? `${item.where} — ` : ''
-      body.push(`${icon} ${where}${item.verdict.headline}${item.via === 'cache' ? '（缓存）' : ''}`)
+      body.push(`${icon} ${where}${item.verdict.headline}${viaMark(item.via)}`)
       for (const detail of item.verdict.details ?? []) body.push(`    ${detail}`)
     }
     const neutral = result.items.filter(item => item.verdict.level === 'info').length
@@ -533,6 +644,10 @@ export function apply (ctx: KitContext, input: Partial<Config> = {}): void {
       defaultRepo: config.defaultRepo,
       engines: config.engines,
       layaEndpoint: config.layaEndpoint,
+      agentjevEndpoint: config.agentjevEndpoint,
+      /* The fallback is part of the status because a silent fallback is a lie by omission. */
+      fallback: { engine: config.fallbackEngine, channels: config.fallbackChannels },
+      engineThresholds: config.engineThresholds,
       thresholds: thresholdOverrides(),
       /** Compact `GROUP:id` list, for the card's catalogue section. */
       catalogue: CHANNEL_LIST.map(channel => `${channel.group}:${channel.id}`),
@@ -922,7 +1037,10 @@ async function gitDiff (repo: string, staged: boolean, timeoutMs = 15_000): Prom
         `**dsh-jev-kit** v${VERSION}`,
         policy,
         `key=${keyState.source}${keyState.value ? '' : '  ⚠️ 未解析到 key：所有判断都会被跳过（fail-open）'}`,
-        `引擎 ${config.engines.join(' → ')} · 本地端点 ${config.layaEndpoint || '（未配置）'}`,
+        `引擎 ${config.engines.join(' → ')} · 本地端点 ${config.layaEndpoint || '（未配置）'} · AgentJev ${config.agentjevEndpoint || '（未配置）'}`,
+        config.fallbackEngine
+          ? `兜底 ${config.fallbackEngine}（${(config.fallbackChannels ?? []).length ? config.fallbackChannels.join('、') : '所有通道'}）— 仅在路由引擎无法作答时接管，判定会标注「本地兜底」`
+          : '兜底 未启用（settings.fallbackEngine 为空）',
         `本地引擎限流 state ${config.localStateChars} 字符 / 数组 ${config.localMaxItems} 项`,
         `超时 单次 ${config.requestTimeoutMs}ms · 单次调用预算 ${config.callBudgetMs}ms · 每次最多 ${config.maxItems} 条 · 并发 ${config.concurrency}`,
         `预算 今日 ${state.dayCalls}/${config.dailyCallLimit} · 本会话 ${config.sessionCallLimit}`,

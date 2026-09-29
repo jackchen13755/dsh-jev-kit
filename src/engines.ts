@@ -105,6 +105,92 @@ export function layaEngine (options: { endpoint: string }): Engine {
 }
 
 /**
+ * The third engine: AgentJev-0.6B, a local System One model with its **own** contract.
+ *
+ *   POST <endpoint>/api/evaluate
+ *   { "state": {...}, "questions": [ { "id", "type": "boolean"|"choice"|"score", ... } ] }
+ *   → { "results": [ { "answers": [ { "id", "type", "probability"|"value"|"score", … } ] } ],
+ *       "usage": { "wall_ms": 462.2, "generated_tokens": 0 } }
+ *
+ * Laya spoke the kit's own shape because that shim was ours to write; AgentJev is a
+ * published server (github.com/malevrigns/agent-jev) whose contract is a list of
+ * typed questions, so the translation lives here and no external adapter is needed.
+ * Measured on this machine (M2/16G, MPS, fp32, 317 fixtures): 122.5 s for the whole
+ * suite at concurrency 4, p50 1015 ms per call, ~2.6 calls/s — slower per call than
+ * the hosted engine (p50 ~320 ms) and behind it on quality, which is why it ships as
+ * a **fallback**, not as the primary engine.
+ */
+export function toAgentJevQuestions (questions: Record<string, JevQuestion>): Array<Record<string, unknown>> {
+  return Object.entries(questions).map(([id, question]) => {
+    if (question.type === 'noul') {
+      const item: Record<string, unknown> = { id, type: 'boolean', instructions: question.instructions }
+      if (question.criteria) item.criteria = question.criteria
+      return item
+    }
+    if (question.type === 'choice') return { id, type: 'choice', instructions: question.instructions, options: question.criteria }
+    return { id, type: 'score', instructions: question.instructions, levels: question.criteria }
+  })
+}
+
+/** Normalise one AgentJev response into the kit's answer shape. */
+export function fromAgentJevAnswers (body: unknown): { answers: Record<string, JevAnswer>, ms: number } {
+  const payload = body as { results?: Array<{ answers?: Array<Record<string, unknown>> }>, usage?: { wall_ms?: number } }
+  const results = payload?.results
+  if (!Array.isArray(results) || !results.length || !Array.isArray(results[0]?.answers)) {
+    throw new Error('agentjev: response has no `results[].answers` array')
+  }
+  const answers: Record<string, JevAnswer> = {}
+  for (const result of results) {
+    for (const answer of result.answers ?? []) {
+      const id = String(answer.id ?? '')
+      const probabilities = (answer.distribution ?? undefined) as Record<string, number> | undefined
+      if (!id) continue
+      if (answer.type === 'boolean') answers[id] = { type: 'noul', noul: Number(answer.probability ?? 0), probabilities }
+      else if (answer.type === 'choice') answers[id] = { type: 'choice', choice: String(answer.value ?? ''), probabilities }
+      else if (answer.type === 'score') answers[id] = { type: 'score', score: Number(answer.score ?? 0), probabilities }
+    }
+  }
+  if (!Object.keys(answers).length) throw new Error('agentjev: response carried no usable answers')
+  return { answers, ms: Number(payload?.usage?.wall_ms ?? 0) }
+}
+
+export function agentJevEngine (options: { endpoint: string }): Engine {
+  const url = options.endpoint.trim().replace(/\/+$/, '')
+  return {
+    id: 'agentjev',
+    label: `AgentJev-0.6B (local, ${url || 'unconfigured'})`,
+    async available () {
+      if (!url) return false
+      try {
+        const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1500) })
+        return response.ok
+      } catch {
+        return false
+      }
+    },
+    async ask (state, questions, opts) {
+      if (!url) throw new Error('agentjev: no endpoint configured')
+      const response = await fetch(`${url}/api/evaluate`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ state, questions: toAgentJevQuestions(questions) }),
+        signal: AbortSignal.timeout(opts.timeoutMs),
+      })
+      if (!response.ok) {
+        /*
+         * The server refuses over-length input instead of truncating it, and says so
+         * with a 400 that names the token count. Carrying that text through matters:
+         * `max_tokens_exceeded` means "this unit was never judged", not "clean".
+         */
+        const detail = await response.text().catch(() => '')
+        throw new Error(`agentjev: HTTP ${response.status}${detail ? ` ${detail.slice(0, 200)}` : ''}`)
+      }
+      return fromAgentJevAnswers(await response.json())
+    },
+  }
+}
+
+/**
  * Shrink a state to what a local engine can afford to read.
  *
  * Measured on an M2 with the ONNX English checkpoint: a 22-character state costs

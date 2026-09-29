@@ -21,7 +21,7 @@ export type LedgerRecord =
     t: number; kind: 'decision'; channel: string; group: string; level: string
     /** The verdict's headline numbers (probabilities, choices, scores). */
     values: Record<string, number | string | undefined>
-    ms?: number; via?: 'jev' | 'cache'; chars: number; item?: number
+    ms?: number; via?: string; chars: number; item?: number
     /**
      * Which entry produced this judgment: `hook`, `card`, `command`, `test`, or a
      * session id.
@@ -43,7 +43,8 @@ export type LedgerRecord =
   }
   | { t: number; kind: 'bench'; engines: string[]; fixtures: number }
   | { t: number; kind: 'degraded'; channel: string; reason: string }
-  | { t: number; kind: 'error'; channel: string; message: string }
+  /** `engine` names which engine failed, now that more than one can be routed to. */
+  | { t: number; kind: 'error'; channel: string; message: string; engine?: string }
   /**
    * Somebody reported, after the fact, whether the advice was acted on.
    *
